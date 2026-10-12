@@ -1,5 +1,5 @@
 /*
- * gestor_transacciones.cpp - Gestor de Transacciones (GT) del SRB
+ * gestorTransacciones.cpp - Gestor de Transacciones (GT) del SRB
  *
  * Decisiones de diseño:
  * - El GT es la puerta de entrada: recibe a los clientes por un ROUTER (atiende muchos clientes a la vez)
@@ -23,7 +23,7 @@
  *   RMC -> GT       : OK|... | RECHAZADO|motivo | ERROR|motivo     (el GT lo devuelve tal cual al cliente)
  *   GT -> Cancelación: CANCELAR|idPeticion|idCliente|idReserva|endpointCliente  (Cancelación usa PULL y bind)
  *
- * Compilar: g++ -std=c++17 -O2 gestor_transacciones.cpp -o gestor -lzmq -lpthread
+ * Compilar: g++ -std=c++17 -Wall -Wextra -O2 gestorTransacciones.cpp -o gestor -lzmq -lpthread
  * Ejecutar: ./gestor <puertoClientes> <endpointRmc[,endpointRmc2,...]> <endpointCancelacion> [trabajadores=4]
  *   Ej.:    ./gestor 5555 tcp://127.0.0.1:5556 tcp://127.0.0.1:5557 4
  */

@@ -25,7 +25,7 @@
  *   Cualquier fallo interno de la BD                            -> ERROR|motivo
  *   (en MODIFICAR, la fecha '-' significa "misma fecha, solo cambia el número de asientos")
  *
- * Compilar: g++ -std=c++17 -O2 persistencia.cpp -o persistencia -lzmq -lpqxx -lpq -lpthread
+ * Compilar: g++ -std=c++17 -Wall -Wextra -O2 persistencia.cpp -o persistencia -lzmq -lpqxx -lpq -lpthread
  * Ejecutar: ./persistencia <puertoEscucha> "<cadenaConexionPostgres>" [trabajadores=4]
  *   Ej.:    ./persistencia 5558 "host=127.0.0.1 port=5434 dbname=srb user=postgres password=postgres" 4
  */
@@ -33,6 +33,8 @@
 #include <zmq.hpp>
 
 #include <pqxx/pqxx>
+
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 #include <algorithm>
 #include <atomic>

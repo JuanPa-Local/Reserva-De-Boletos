@@ -13,4 +13,4 @@ Se actualiza y se realiza commit y push tras completar cada tarea.
 - [x] **Tarea 6**: Configuración y documentación de `docker-compose.yml` (`docker compose --env-file config.env up -d`, verificación de carga de `schema_demo.sql`).
 - [x] **Tarea 7**: Script `iniciar_capa.sh <persistencia|negocio|gt|clientes>` para ejecución distribuida en 3 máquinas con logs visibles.
 - [x] **Tarea 8**: Documentación completa en `README.md` (dependencias, compilación, orden de arranque, puertos de red, parámetros, reset BD, demo y pruebas de carga).
-- [ ] **Tarea 9**: Configurar `.gitignore` y corregir cabeceras desactualizadas en archivos `.cpp`.
+- [x] **Tarea 9**: Configurar `.gitignore` y corregir cabeceras desactualizadas en archivos `.cpp`.

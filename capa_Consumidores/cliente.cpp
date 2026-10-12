@@ -23,7 +23,7 @@
  *     CANCELAR  <idReserva>
  *   En lugar de <idReserva> se puede escribir ULTIMA (id de la última reserva exitosa).
  *
- * Compilar: g++ -std=c++17 -O2 cliente.cpp -o cliente -lzmq -lpthread
+ * Compilar: g++ -std=c++17 -Wall -Wextra -O2 cliente.cpp -o cliente -lzmq -lpthread
  */
 
 #include <zmq.hpp>
