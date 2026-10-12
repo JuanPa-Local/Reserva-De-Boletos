@@ -37,10 +37,12 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace std;
@@ -54,9 +56,14 @@ struct Configuracion {
     string idCliente;
     string endpointGestor;
     string ipCliente;
-    string archivoSolicitudes;
     int puertoNotificaciones = 6001;
+    string archivoSolicitudes;
     int solicitudesPorMinuto = 20;
+    bool modoAleatorio = false;
+    int pctConsulta = 70;         // % CONSULTA
+    int pctModificar = 0;         // % MODIFICAR opcional (por defecto 0)
+    int duracionSegundos = 60;    // duración en segundos en modo aleatorio
+    unsigned int semilla = 0;     // semilla para generador aleatorio
 };
 
 struct Solicitud {
@@ -88,6 +95,10 @@ string unir(const vector<string>& partes, const char separador) {
         resultado += (i == 0 ? "" : string(1, separador)) + partes[i];
     }
     return resultado;
+}
+
+long long nanosAhora() {
+    return chrono::duration_cast<chrono::nanoseconds>(chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // Cantidad de argumentos que exige cada tipo de solicitud (-1 si el tipo no existe).
@@ -299,12 +310,15 @@ string extraerIdReserva(const string& respuesta) {
 // ---------------------------------------------------------------- ejecución
 
 void ejecutarSolicitudes(const Configuracion& configuracion) {
-    const vector<Solicitud> solicitudes = LectorSolicitudes::leer(configuracion.archivoSolicitudes);
-
     zmq::context_t contexto(1);
     ReceptorNotificaciones receptor(contexto, configuracion.puertoNotificaciones);
     GestorTransacciones gestor(contexto, configuracion.endpointGestor, timeoutRespuestaMs);
     Estadisticas estadisticas;
+
+    const long long timestampCorrida =
+        chrono::duration_cast<chrono::milliseconds>(chrono::system_clock::now().time_since_epoch()).count();
+    const int pidCorrida = static_cast<int>(getpid());
+    const string idCorrida = to_string(timestampCorrida) + "-" + to_string(pidCorrida);
 
     const chrono::milliseconds intervalo(60000 / configuracion.solicitudesPorMinuto);
     const chrono::steady_clock::time_point inicio = chrono::steady_clock::now();
@@ -312,34 +326,116 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
     string ultimaReserva;
     int contador = 0;
 
-    imprimir("[" + configuracion.idCliente + "] " + to_string(solicitudes.size()) + " solicitudes, " +
-            to_string(configuracion.solicitudesPorMinuto) + " por minuto");
-
-    for (const Solicitud& solicitud : solicitudes) {
-        proximoEnvio += intervalo;
-        ++contador;
-
-        vector<string> argumentos = solicitud.argumentos;
-        if (!resolverUltimaReserva(argumentos, ultimaReserva)) {
-            imprimir(solicitud.tipo + " omitida: todavía no hay una reserva exitosa (ULTIMA)");
-            continue;
+    if (configuracion.modoAleatorio) {
+        // Descubrir eventos existentes en la BD mediante una consulta del mes 11
+        vector<pair<string, string>> eventosDisponibles;
+        const string peticionInit = configuracion.idCliente + "-" + idCorrida + "-init";
+        const string msgInit = construirMensaje("CONSULTA", peticionInit, configuracion, {"11"});
+        const string respInit = gestor.enviar(msgInit);
+        if (respInit.rfind("OK|", 0) == 0) {
+            const string datos = respInit.substr(3);
+            const vector<string> items = dividir(datos, ';');
+            for (const string& item : items) {
+                const vector<string> campos = dividir(item, ',');
+                if (campos.size() >= 2) {
+                    eventosDisponibles.emplace_back(campos[0], campos[1]);
+                }
+            }
+        }
+        if (eventosDisponibles.empty()) {
+            eventosDisponibles.push_back({"E1", "2026-11-01"});
+            eventosDisponibles.push_back({"E2", "2026-11-01"});
         }
 
-        const string idPeticion = configuracion.idCliente + "-" + to_string(contador);
-        const string mensaje = construirMensaje(solicitud.tipo, idPeticion, configuracion, argumentos);
+        mt19937 generador(configuracion.semilla != 0 ? configuracion.semilla : static_cast<unsigned int>(nanosAhora()));
+        uniform_int_distribution<int> distPct(0, 99);
+        uniform_int_distribution<int> distAsientos(1, 2);
+        uniform_int_distribution<size_t> distEv(0, eventosDisponibles.size() - 1);
 
-        const chrono::steady_clock::time_point antes = chrono::steady_clock::now();
-        const string respuesta = gestor.enviar(mensaje);
-        const double milisegundos =
-            chrono::duration<double, milli>(chrono::steady_clock::now() - antes).count();
+        imprimir("[" + configuracion.idCliente + "] MODO ALEATORIO: " +
+                 to_string(configuracion.solicitudesPorMinuto) + " TPM, " +
+                 to_string(configuracion.pctConsulta) + "% CONSULTA / " +
+                 to_string(configuracion.pctModificar) + "% MODIFICAR / " +
+                 to_string(100 - configuracion.pctConsulta - configuracion.pctModificar) + "% RESERVAR, duracion " +
+                 to_string(configuracion.duracionSegundos) + " s (" +
+                 to_string(eventosDisponibles.size()) + " eventos detectados)");
 
-        estadisticas.registrar(solicitud.tipo, milisegundos);
-        if (solicitud.tipo == "RESERVAR" && !extraerIdReserva(respuesta).empty()) {
-            ultimaReserva = extraerIdReserva(respuesta);
+        const chrono::steady_clock::time_point finPrevisto = inicio + chrono::seconds(configuracion.duracionSegundos);
+        while (chrono::steady_clock::now() < finPrevisto) {
+            proximoEnvio += intervalo;
+            ++contador;
+
+            Solicitud solicitud;
+            const int roll = distPct(generador);
+            if (roll < configuracion.pctConsulta) {
+                solicitud.tipo = "CONSULTA";
+                solicitud.argumentos = {"11"};
+            } else if (roll < configuracion.pctConsulta + configuracion.pctModificar) {
+                if (!ultimaReserva.empty()) {
+                    solicitud.tipo = "MODIFICAR";
+                    solicitud.argumentos = {ultimaReserva, to_string(distAsientos(generador)), "-"};
+                } else {
+                    solicitud.tipo = "RESERVAR";
+                    const pair<string, string>& ev = eventosDisponibles[distEv(generador)];
+                    solicitud.argumentos = {ev.first, ev.second, to_string(distAsientos(generador))};
+                }
+            } else {
+                solicitud.tipo = "RESERVAR";
+                const pair<string, string>& ev = eventosDisponibles[distEv(generador)];
+                solicitud.argumentos = {ev.first, ev.second, to_string(distAsientos(generador))};
+            }
+
+            const string idPeticion = configuracion.idCliente + "-" + idCorrida + "-" + to_string(contador);
+            const string mensaje = construirMensaje(solicitud.tipo, idPeticion, configuracion, solicitud.argumentos);
+
+            const chrono::steady_clock::time_point antes = chrono::steady_clock::now();
+            const string respuesta = gestor.enviar(mensaje);
+            const double milisegundos =
+                chrono::duration<double, milli>(chrono::steady_clock::now() - antes).count();
+
+            estadisticas.registrar(solicitud.tipo, milisegundos);
+            if (solicitud.tipo == "RESERVAR" && !extraerIdReserva(respuesta).empty()) {
+                ultimaReserva = extraerIdReserva(respuesta);
+            }
+            imprimir(mensaje + "  ->  " + respuesta + "  (" + to_string(milisegundos) + " ms)");
+
+            if (chrono::steady_clock::now() < proximoEnvio) {
+                this_thread::sleep_until(proximoEnvio);
+            }
         }
-        imprimir(mensaje + "  ->  " + respuesta + "  (" + to_string(milisegundos) + " ms)");
+    } else {
+        const vector<Solicitud> solicitudes = LectorSolicitudes::leer(configuracion.archivoSolicitudes);
+        imprimir("[" + configuracion.idCliente + "] MODO ARCHIVO: " + to_string(solicitudes.size()) + " solicitudes, " +
+                 to_string(configuracion.solicitudesPorMinuto) + " por minuto");
 
-        this_thread::sleep_until(proximoEnvio);
+        for (const Solicitud& solicitud : solicitudes) {
+            proximoEnvio += intervalo;
+            ++contador;
+
+            vector<string> argumentos = solicitud.argumentos;
+            if (!resolverUltimaReserva(argumentos, ultimaReserva)) {
+                imprimir(solicitud.tipo + " omitida: todavía no hay una reserva exitosa (ULTIMA)");
+                continue;
+            }
+
+            const string idPeticion = configuracion.idCliente + "-" + idCorrida + "-" + to_string(contador);
+            const string mensaje = construirMensaje(solicitud.tipo, idPeticion, configuracion, argumentos);
+
+            const chrono::steady_clock::time_point antes = chrono::steady_clock::now();
+            const string respuesta = gestor.enviar(mensaje);
+            const double milisegundos =
+                chrono::duration<double, milli>(chrono::steady_clock::now() - antes).count();
+
+            estadisticas.registrar(solicitud.tipo, milisegundos);
+            if (solicitud.tipo == "RESERVAR" && !extraerIdReserva(respuesta).empty()) {
+                ultimaReserva = extraerIdReserva(respuesta);
+            }
+            imprimir(mensaje + "  ->  " + respuesta + "  (" + to_string(milisegundos) + " ms)");
+
+            if (chrono::steady_clock::now() < proximoEnvio) {
+                this_thread::sleep_until(proximoEnvio);
+            }
+        }
     }
 
     const double segundosTotales = chrono::duration<double>(chrono::steady_clock::now() - inicio).count();
@@ -349,9 +445,10 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
 
 int main(int argc, char** argv) {
     if (argc < 6) {
-        cerr << "Uso: " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> <solicitudes.txt> "
-            << "[solicitudesPorMinuto=20]\n"
-            << "Ej.: " << argv[0] << " cli1 tcp://10.0.0.2:5555 10.0.0.1 6001 solicitudes.txt 30\n";
+        cerr << "Uso (archivo):   " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> <solicitudes.txt> [solicitudesPorMinuto=20]\n"
+             << "Uso (aleatorio): " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm>=20 <pctConsulta>=70 <duracionSeg>=60 [semilla]\n"
+             << "Flags opcionales: --archivo <f> | --aleatorio --tpm <N> --pct <P> --duracion <S> --semilla <seed>\n"
+             << "Ej.: " << argv[0] << " cli1 tcp://10.0.0.2:5555 10.0.0.1 6001 solicitudes.txt 30\n";
         return 1;
     }
     try {
@@ -360,13 +457,84 @@ int main(int argc, char** argv) {
         configuracion.endpointGestor = argv[2];
         configuracion.ipCliente = argv[3];
         configuracion.puertoNotificaciones = stoi(argv[4]);
-        configuracion.archivoSolicitudes = argv[5];
-        if (argc >= 7) {
-            configuracion.solicitudesPorMinuto = stoi(argv[6]);
+
+        int idx = 5;
+        string arg5 = argv[5];
+        if (arg5 == "aleatorio" || arg5 == "--aleatorio") {
+            configuracion.modoAleatorio = true;
+            ++idx;
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.solicitudesPorMinuto = stoi(argv[idx++]);
+            }
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.pctConsulta = stoi(argv[idx++]);
+            }
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.duracionSegundos = stoi(argv[idx++]);
+            }
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.semilla = static_cast<unsigned int>(stoul(argv[idx++]));
+            }
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.pctModificar = stoi(argv[idx++]);
+            }
+        } else if (arg5[0] != '-') {
+            configuracion.archivoSolicitudes = arg5;
+            ++idx;
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.solicitudesPorMinuto = stoi(argv[idx++]);
+            }
         }
-        if (configuracion.solicitudesPorMinuto <= 0) {
-            throw invalid_argument("solicitudesPorMinuto debe ser mayor que 0");
+
+        while (idx < argc) {
+            string flag = argv[idx];
+            if (flag == "--aleatorio") {
+                configuracion.modoAleatorio = true;
+                ++idx;
+            } else if (flag == "--archivo" && idx + 1 < argc) {
+                configuracion.archivoSolicitudes = argv[++idx];
+                configuracion.modoAleatorio = false;
+                ++idx;
+            } else if (flag == "--tpm" && idx + 1 < argc) {
+                configuracion.solicitudesPorMinuto = stoi(argv[++idx]);
+                ++idx;
+            } else if ((flag == "--pct" || flag == "--pct-consulta") && idx + 1 < argc) {
+                configuracion.pctConsulta = stoi(argv[++idx]);
+                ++idx;
+            } else if ((flag == "--pct-modificar" || flag == "--pct-mod") && idx + 1 < argc) {
+                configuracion.pctModificar = stoi(argv[++idx]);
+                ++idx;
+            } else if (flag == "--duracion" && idx + 1 < argc) {
+                configuracion.duracionSegundos = stoi(argv[++idx]);
+                ++idx;
+            } else if (flag == "--semilla" && idx + 1 < argc) {
+                configuracion.semilla = static_cast<unsigned int>(stoul(argv[++idx]));
+                ++idx;
+            } else {
+                ++idx;
+            }
         }
+
+        if (configuracion.solicitudesPorMinuto < 20) {
+            throw invalid_argument("solicitudesPorMinuto debe ser al menos 20 (actual: " +
+                                   to_string(configuracion.solicitudesPorMinuto) + ")");
+        }
+        if (configuracion.pctConsulta < 0 || configuracion.pctConsulta > 100) {
+            throw invalid_argument("pctConsulta debe estar entre 0 y 100");
+        }
+        if (configuracion.pctModificar < 0 || configuracion.pctModificar > 100) {
+            throw invalid_argument("pctModificar debe estar entre 0 y 100");
+        }
+        if (configuracion.pctConsulta + configuracion.pctModificar > 100) {
+            throw invalid_argument("pctConsulta + pctModificar no debe exceder 100%");
+        }
+        if (configuracion.modoAleatorio && configuracion.duracionSegundos <= 0) {
+            throw invalid_argument("duracion debe ser mayor que 0");
+        }
+        if (!configuracion.modoAleatorio && configuracion.archivoSolicitudes.empty()) {
+            throw invalid_argument("Debe especificar un archivo de solicitudes o usar modo aleatorio");
+        }
+
         ejecutarSolicitudes(configuracion);
     } catch (const exception& error) {
         cerr << "Error: " << error.what() << endl;
