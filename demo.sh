@@ -41,18 +41,42 @@ pausar() {
     echo ""
 }
 
-mostrar_logs() {
-    local n="${1:-6}"
+LOG_LINEAS_P=0
+LOG_LINEAS_R=0
+LOG_LINEAS_G=0
+
+mostrar_nuevos_logs() {
+    local total_p total_r total_g
+    total_p=$(wc -l < /tmp/srb_persistencia.log 2>/dev/null || echo 0)
+    total_r=$(wc -l < /tmp/srb_rmc.log 2>/dev/null || echo 0)
+    total_g=$(wc -l < /tmp/srb_gt.log 2>/dev/null || echo 0)
+
     echo ""
-    echo "--- Últimas líneas de logs de servicios backend ---"
+    echo "--- Nuevas líneas en logs de servicios backend ---"
     echo ">> [LOG Persistencia]:"
-    tail -n "$n" /tmp/srb_persistencia.log 2>/dev/null || true
+    if [ "$total_p" -gt "$LOG_LINEAS_P" ]; then
+        sed -n "$((LOG_LINEAS_P + 1)),${total_p}p" /tmp/srb_persistencia.log 2>/dev/null || true
+    else
+        echo "   (sin actividad nueva)"
+    fi
     echo ">> [LOG RMC]:"
-    tail -n "$n" /tmp/srb_rmc.log 2>/dev/null || true
+    if [ "$total_r" -gt "$LOG_LINEAS_R" ]; then
+        sed -n "$((LOG_LINEAS_R + 1)),${total_r}p" /tmp/srb_rmc.log 2>/dev/null || true
+    else
+        echo "   (sin actividad nueva)"
+    fi
     echo ">> [LOG GT]:"
-    tail -n "$n" /tmp/srb_gt.log 2>/dev/null || true
-    echo "----------------------------------------------------"
+    if [ "$total_g" -gt "$LOG_LINEAS_G" ]; then
+        sed -n "$((LOG_LINEAS_G + 1)),${total_g}p" /tmp/srb_gt.log 2>/dev/null || true
+    else
+        echo "   (sin actividad nueva)"
+    fi
+    echo "--------------------------------------------------"
     echo ""
+
+    LOG_LINEAS_P=$total_p
+    LOG_LINEAS_R=$total_r
+    LOG_LINEAS_G=$total_g
 }
 
 echo "================================================================================"
@@ -107,6 +131,10 @@ pausar
 # 3. Limpiar procesos previos de servicios
 echo "[-] Limpiando instancias previas de servicios..."
 killall persistencia cancelacion rmc gestor 2>/dev/null || true
+rm -f /tmp/srb_persistencia.log /tmp/srb_cancelacion.log /tmp/srb_rmc.log /tmp/srb_gt.log
+LOG_LINEAS_P=0
+LOG_LINEAS_R=0
+LOG_LINEAS_G=0
 sleep 1
 
 # Iniciar servicios en background y configurar limpieza al salir
@@ -136,7 +164,7 @@ trap cleanup EXIT INT TERM
 
 sleep 1
 echo "[+] Servicios iniciados: Persistencia ($PID_PERSISTENCIA), Cancelacion ($PID_CANCELACION), RMC ($PID_RMC), GT ($PID_GT)."
-mostrar_logs 6
+mostrar_nuevos_logs
 pausar
 
 # -----------------------------------------------------------------------------
@@ -156,7 +184,7 @@ echo ">> Ejecutando Cliente cli_demo1 (5 asientos E1)..."
 
 echo ">> Ejecutando Cliente cli_demo2 (3 asientos E1)..."
 "$BIN_CLIENTE" cli_demo2 "$ENDPOINT_GT" 127.0.0.1 6002 /tmp/srb_demo_b2.txt 60
-mostrar_logs 6
+mostrar_nuevos_logs
 pausar
 
 # -----------------------------------------------------------------------------
@@ -178,7 +206,7 @@ fi
 echo -e "[\033[1;32mOK\033[0m] Asercion BD E1 superada (92/8)."
 
 "$DIR/estado.sh"
-mostrar_logs 6
+mostrar_nuevos_logs
 pausar
 
 # -----------------------------------------------------------------------------
@@ -230,7 +258,7 @@ if [ "$ACEPTADOS" -ne 5 ] || [ "$RECHAZADOS" -ne 1 ] || [ "$ERRORES" -ne 0 ]; th
 fi
 echo -e "[\033[1;32mOK\033[0m] Asercion de respuestas concurrentes superada (5 aceptados, 1 rechazado)."
 
-mostrar_logs 8
+mostrar_nuevos_logs
 pausar
 
 # -----------------------------------------------------------------------------
@@ -266,7 +294,7 @@ fi
 echo -e "[\033[1;32mOK\033[0m] Asercion de consistencia global superada."
 
 "$DIR/estado.sh"
-mostrar_logs 6
+mostrar_nuevos_logs
 
 echo ""
 echo "================================================================================"
