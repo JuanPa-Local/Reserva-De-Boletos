@@ -208,30 +208,33 @@ Ejecutar los clientes de prueba:
 
 ## 8. Escenarios de Carga y Concurrencia (`lanzar_clientes.sh`)
 
-El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado:
+El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado.
+
+> [!IMPORTANT]
+> **Duración y Carga de Pruebas**: Para evaluar la capacidad real del sistema distribuido y estabilizar las métricas de rendimiento (promedio, desviación estándar y TPM), las pruebas de rendimiento deben durar **entre 2 y 3 minutos** (120 s a 180 s) y emplear un **TPM alto** (por defecto 300 solicitudes/minuto por cliente). Duraciones más cortas o TPMs bajos no permiten saturar los canales de concurrencia ni observar el régimen estacionario de los servicios backend.
 
 ### Uso de Escenarios:
 ```bash
 # Escenario 3 clientes:
 # 2 clientes solo consulta (100% CONSULTA), 1 cliente consulta y reserva (70% CONSULTA / 30% RESERVAR)
-./lanzar_clientes.sh --escenario 3 [tpm=30] [duracion=15]
+./lanzar_clientes.sh --escenario 3 [tpm=300] [duracion=120]
 
 # Escenario 5 clientes:
 # 3 clientes solo consulta (100% CONSULTA), 2 clientes reserva y modificacion (50% RESERVAR / 50% MODIFICAR)
-./lanzar_clientes.sh --escenario 5 [tpm=30] [duracion=15]
+./lanzar_clientes.sh --escenario 5 [tpm=300] [duracion=120]
 
 # Escenario 8 clientes:
 # 4 clientes solo consulta (100% CONSULTA), 4 clientes reserva y modificacion (50% RESERVAR / 50% MODIFICAR)
-./lanzar_clientes.sh --escenario 8 [tpm=30] [duracion=15]
+./lanzar_clientes.sh --escenario 8 [tpm=300] [duracion=120]
 ```
 
 ### Uso Personalizado:
 ```bash
-./lanzar_clientes.sh <N> [archivo_solicitudes|aleatorio] [tpm] [pctConsulta] [duracion]
+./lanzar_clientes.sh <N> [archivo_solicitudes|aleatorio] [tpm=300] [pctConsulta=70] [duracion=120]
 
 # Ejemplos:
-./lanzar_clientes.sh 5 aleatorio 40 70 20
-./lanzar_clientes.sh 3 solicitudes.txt 30
+./lanzar_clientes.sh 5 aleatorio 300 70 120
+./lanzar_clientes.sh 3 solicitudes.txt 60
 ```
 
 ---

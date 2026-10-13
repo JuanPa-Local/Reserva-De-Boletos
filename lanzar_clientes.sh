@@ -31,13 +31,13 @@ ESCENARIO=""
 if [ "$1" = "--escenario" ]; then
     ESCENARIO="$2"
     shift 2
-    TPM="${1:-30}"
-    DURACION="${2:-15}"
+    TPM="${1:-300}"
+    DURACION="${2:-120}"
 elif [[ "$1" == --escenario=* ]]; then
     ESCENARIO="${1#--escenario=}"
     shift 1
-    TPM="${1:-30}"
-    DURACION="${2:-15}"
+    TPM="${1:-300}"
+    DURACION="${2:-120}"
 fi
 
 if [ -n "$ESCENARIO" ]; then
@@ -50,21 +50,21 @@ if [ -n "$ESCENARIO" ]; then
 else
     if [ -z "$1" ]; then
         echo "Uso:"
-        echo "  $0 <N> [archivo_solicitudes|aleatorio] [tpm] [pctConsulta] [duracion]"
-        echo "  $0 --escenario <3|5|8> [tpm] [duracion]"
+        echo "  $0 <N> [archivo_solicitudes|aleatorio] [tpm=300] [pctConsulta=70] [duracion=120]"
+        echo "  $0 --escenario <3|5|8> [tpm=300] [duracion=120]"
         echo "Ejemplos:"
         echo "  $0 3"
-        echo "  $0 5 aleatorio 30 70 20"
+        echo "  $0 5 aleatorio 300 70 120"
         echo "  $0 --escenario 3"
-        echo "  $0 --escenario 5 30 20"
-        echo "  $0 --escenario 8 30 20"
+        echo "  $0 --escenario 5 300 120"
+        echo "  $0 --escenario 8 300 120"
         exit 1
     fi
     N="$1"
     MODO="${2:-aleatorio}"
-    TPM="${3:-30}"
+    TPM="${3:-300}"
     PCT="${4:-70}"
-    DURACION="${5:-15}"
+    DURACION="${5:-120}"
 fi
 
 ENDPOINT_GT="tcp://${IP_GT:-127.0.0.1}:${PUERTO_GT:-5555}"
