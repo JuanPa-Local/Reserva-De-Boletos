@@ -89,17 +89,22 @@ case "$CAPA" in
         echo " Cancelacion  : Escuchando en puerto $PUERTO_CANCELACION (hacia $ENDPOINT_PERSISTENCIA)"
         echo "================================================================================"
 
-        "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" "${2:-2}" 2>&1 | sed 's/^/[CANCELACION] /' &
+        "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" "${2:-2}" > >(sed 's/^/[CANCELACION] /') 2>&1 &
         PID_CANC=$!
 
-        "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" "${1:-4}" 2>&1 | sed 's/^/[RMC] /' &
+        "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" "${1:-4}" > >(sed 's/^/[RMC] /') 2>&1 &
         PID_RMC=$!
 
+        limpiado=false
         cleanup_negocio() {
+            if [ "$limpiado" = true ]; then return; fi
+            limpiado=true
             echo ""
             echo "[-] Deteniendo servicios de negocio (RMC PID $PID_RMC, Cancelacion PID $PID_CANC)..."
-            kill "$PID_CANC" "$PID_RMC" 2>/dev/null || true
-            wait "$PID_CANC" "$PID_RMC" 2>/dev/null || true
+            kill -TERM "$PID_CANC" "$PID_RMC" 2>/dev/null || true
+            wait "$PID_CANC" 2>/dev/null || true
+            wait "$PID_RMC" 2>/dev/null || true
+            sleep 0.5
             echo "[+] Capa de negocio detenida."
         }
         trap cleanup_negocio EXIT INT TERM
