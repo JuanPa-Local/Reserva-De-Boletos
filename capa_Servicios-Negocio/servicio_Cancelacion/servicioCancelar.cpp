@@ -1,5 +1,5 @@
 /*
- * cancelacion_notificacion.cpp - Servicio de Cancelaciones y Notificaciones del SRB
+ * servicioCancelar.cpp - Servicio de Cancelaciones y Notificaciones del SRB
  *
  * Decisiones de diseño:
  * - Flujo asíncrono (el cliente ya recibió su ACK del GT y no está esperando):
@@ -22,7 +22,7 @@
  *   Persistencia -> Cancelación: OK|mensaje | RECHAZADO|motivo | ERROR|motivo
  *   Cancelación -> Cliente    : NOTIF|idReserva|OK|mensaje   o   NOTIF|idReserva|ERROR|motivo
  *
- * Compilar: g++ -std=c++17 -O2 cancelacion_notificacion.cpp -o cancelacion -lzmq -lpthread
+ * Compilar: g++ -std=c++17 -Wall -Wextra -O2 servicioCancelar.cpp -o cancelacion -lzmq -lpthread
  * Ejecutar: ./cancelacion <puertoEscucha> <endpointPersistencia[,endpointPersistencia2,...]> [trabajadores=2]
  *   Ej.:    ./cancelacion 5557 tcp://10.0.0.3:5558 2
  */

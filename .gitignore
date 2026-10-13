@@ -1,0 +1,21 @@
+# Binarios compilados
+capa_Consumidores/cliente
+capa_Servicio-Almacenamiento/persistencia
+capa_Servicios-Negocio/servicio_Cancelacion/cancelacion
+capa_Servicios-Negocio/servicio_GT/gestor
+capa_Servicios-Negocio/servicio_RMC/rmc
+
+# Objetos y librerias
+*.o
+*.out
+*.so
+*.a
+
+# Logs y temporales
+*.log
+/tmp/srb_*
+.DS_Store
+
+# Archivos empaquetados
+*.zip
+*.tar.gz
