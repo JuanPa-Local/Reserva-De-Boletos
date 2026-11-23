@@ -3,7 +3,7 @@
 #
 # Pasos de la demo:
 #   a) Reset BD y Estado inicial: E1 y E2 con 100 asientos libres.
-#   b) Cliente 1 reserva 5 asientos de E1; Cliente 2 reserva 3 de E1 (secuencial).
+#   b) Cliente 1 reserva 5 asientos de E1 y Cliente 2 reserva 3 de E1 (en paralelo).
 #   c) Consulta: E1 queda en 92 libres / 8 ocupados (asercion en BD).
 #   d) 6 clientes concurrentes reservan 20 asientos cada uno de E2:
 #      5 aceptados y 1 rechazado por falta de cupo (asercion en respuestas).
@@ -25,7 +25,7 @@ PUERTO_PG="${PUERTO_POSTGRES:-5434}"
 
 ENDPOINT_PERSISTENCIA="tcp://127.0.0.1:${PUERTO_PERSISTENCIA:-5558}"
 ENDPOINT_RMC="tcp://127.0.0.1:${PUERTO_RMC:-5556}"
-ENDPOINT_CANCELACION="tcp://127.0.0.1:${PUERTO_CANCELACION:-5557}"
+ENDPOINT_CANCELACION="tcp://127.0.0.1:${PUERTO_CANCELACION:-5557},tcp://127.0.0.1:$(( ${PUERTO_CANCELACION:-5557} + ${PASO_REPLICA:-10} ))"
 ENDPOINT_GT="tcp://127.0.0.1:${PUERTO_GT:-5555}"
 
 BIN_PERSISTENCIA="$DIR/capa_Servicio-Almacenamiento/persistencia"
@@ -131,7 +131,7 @@ pausar
 # 3. Limpiar procesos previos de servicios
 echo "[-] Limpiando instancias previas de servicios..."
 killall persistencia cancelacion rmc gestor 2>/dev/null || true
-rm -f /tmp/srb_persistencia.log /tmp/srb_cancelacion.log /tmp/srb_rmc.log /tmp/srb_gt.log
+rm -f /tmp/srb_persistencia.log /tmp/srb_cancelacion.log /tmp/srb_cancelacion2.log /tmp/srb_rmc.log /tmp/srb_gt.log
 LOG_LINEAS_P=0
 LOG_LINEAS_R=0
 LOG_LINEAS_G=0
@@ -148,6 +148,9 @@ PID_PERSISTENCIA=$!
 "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" 2 > /tmp/srb_cancelacion.log 2>&1 &
 PID_CANCELACION=$!
 
+"$BIN_CANCELACION" "$(( ${PUERTO_CANCELACION:-5557} + ${PASO_REPLICA:-10} ))" "$ENDPOINT_PERSISTENCIA" 2 > /tmp/srb_cancelacion2.log 2>&1 &
+PID_CANCELACION2=$!
+
 "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" 4 > /tmp/srb_rmc.log 2>&1 &
 PID_RMC=$!
 
@@ -157,21 +160,21 @@ PID_GT=$!
 cleanup() {
     echo ""
     echo "[-] Deteniendo servicios..."
-    kill "$PID_GT" "$PID_RMC" "$PID_CANCELACION" "$PID_PERSISTENCIA" 2>/dev/null || true
+    kill "$PID_GT" "$PID_RMC" "$PID_CANCELACION" "$PID_CANCELACION2" "$PID_PERSISTENCIA" 2>/dev/null || true
     echo "[+] Servicios detenidos."
 }
 trap cleanup EXIT INT TERM
 
 sleep 1
-echo "[+] Servicios iniciados: Persistencia ($PID_PERSISTENCIA), Cancelacion ($PID_CANCELACION), RMC ($PID_RMC), GT ($PID_GT)."
+echo "[+] Servicios iniciados: Persistencia ($PID_PERSISTENCIA), Cancelacion ($PID_CANCELACION, $PID_CANCELACION2), RMC ($PID_RMC), GT ($PID_GT)."
 mostrar_nuevos_logs
 pausar
 
 # -----------------------------------------------------------------------------
-# PASO B: Reservas secuenciales de E1 (5 asientos y luego 3 asientos)
+# PASO B: Reservas concurrentes de E1 (5 asientos y 3 asientos)
 # -----------------------------------------------------------------------------
 echo "================================================================================"
-echo " PASO B: Reservas secuenciales en E1"
+echo " PASO B: Reservas concurrentes en E1"
 echo "         1. Cliente cli_demo1 reserva 5 asientos de E1"
 echo "         2. Cliente cli_demo2 reserva 3 asientos de E1"
 echo "================================================================================"
@@ -179,11 +182,12 @@ echo "==========================================================================
 echo "RESERVAR E1 2026-11-01 5" > /tmp/srb_demo_b1.txt
 echo "RESERVAR E1 2026-11-01 3" > /tmp/srb_demo_b2.txt
 
-echo ">> Ejecutando Cliente cli_demo1 (5 asientos E1)..."
-"$BIN_CLIENTE" cli_demo1 "$ENDPOINT_GT" 127.0.0.1 6001 /tmp/srb_demo_b1.txt 60
-
-echo ">> Ejecutando Cliente cli_demo2 (3 asientos E1)..."
-"$BIN_CLIENTE" cli_demo2 "$ENDPOINT_GT" 127.0.0.1 6002 /tmp/srb_demo_b2.txt 60
+"$BIN_CLIENTE" cli_demo1 "$ENDPOINT_GT" 127.0.0.1 6001 /tmp/srb_demo_b1.txt 60 > /tmp/srb_demo_b1.log 2>&1 &
+PB1=$!
+"$BIN_CLIENTE" cli_demo2 "$ENDPOINT_GT" 127.0.0.1 6002 /tmp/srb_demo_b2.txt 60 > /tmp/srb_demo_b2.log 2>&1 &
+PB2=$!
+wait "$PB1"; wait "$PB2"
+grep -h "\->" /tmp/srb_demo_b1.log /tmp/srb_demo_b2.log
 mostrar_nuevos_logs
 pausar
 
@@ -295,6 +299,34 @@ echo -e "[\033[1;32mOK\033[0m] Asercion de consistencia global superada."
 
 "$DIR/estado.sh"
 mostrar_nuevos_logs
+
+# -----------------------------------------------------------------------------
+# PASO F: Cancelación asíncrona concurrente de 4 reservas de E2
+# -----------------------------------------------------------------------------
+echo "================================================================================"
+echo " PASO F: Cancelación asíncrona concurrente (2 réplicas) -> E2 debe quedar 80/20"
+echo "================================================================================"
+mapfile -t RESERVAS < <(docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB" -Atc \
+  "SELECT id_cliente || ' ' || id_reserva FROM reserva WHERE id_evento='E2' AND estado='ACTIVA' ORDER BY id_reserva LIMIT 4;")
+PIDS_F=(); k=0
+for linea in "${RESERVAS[@]}"; do
+    k=$((k + 1)); CLI="${linea% *}"; ID="${linea#* }"
+    echo "CANCELAR $ID" > "/tmp/srb_demo_f_${k}.txt"
+    "$BIN_CLIENTE" "$CLI" "$ENDPOINT_GT" 127.0.0.1 "$((6030 + k))" "/tmp/srb_demo_f_${k}.txt" 60 > "/tmp/srb_demo_f_${k}.log" 2>&1 &
+    PIDS_F+=($!)
+done
+for pid in "${PIDS_F[@]}"; do wait "$pid"; done
+
+NOTIFS=$(cat /tmp/srb_demo_f_*.log | grep "NOTIF|" | grep -c "|OK|" || true)
+echo ">> Notificaciones OK recibidas: $NOTIFS (esperado: 4)"
+echo ">> Cancelaciones atendidas -> réplica 1: $(grep -c 'CANCELAR|' /tmp/srb_cancelacion.log || true) | réplica 2: $(grep -c 'CANCELAR|' /tmp/srb_cancelacion2.log || true)"
+RES_F=$(docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB" -Atc "SELECT libres || '/' || ocupados FROM evento WHERE id_evento='E2' AND fecha='2026-11-01';")
+echo ">> Verificacion BD E2: $RES_F (Esperado: 80/20)"
+if [ "$NOTIFS" -ne 4 ] || [ "$RES_F" != "80/20" ]; then
+    echo -e "[\033[1;31mFALLO\033[0m] Cancelación inesperada"; exit 1
+fi
+echo -e "[\033[1;32mOK\033[0m] Cancelaciones asíncronas verificadas (80/20)."
+"$DIR/estado.sh"
 
 echo ""
 echo "================================================================================"
