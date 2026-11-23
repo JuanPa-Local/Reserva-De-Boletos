@@ -89,10 +89,18 @@ case "$CAPA" in
         echo " Cancelacion  : Escuchando en puerto $PUERTO_CANCELACION (hacia $ENDPOINT_PERSISTENCIA)"
         echo "================================================================================"
 
-        "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" "${2:-2}" > >(sed 's/^/[CANCELACION] /') 2>&1 &
+        FIFO_DIR="$(mktemp -d)"
+        mkfifo "$FIFO_DIR/canc" "$FIFO_DIR/rmc"
+
+        ( trap '' INT; exec sed -u 's/^/[CANCELACION] /' < "$FIFO_DIR/canc" ) &
+        PID_SED_CANC=$!
+        ( trap '' INT; exec sed -u 's/^/[RMC] /' < "$FIFO_DIR/rmc" ) &
+        PID_SED_RMC=$!
+
+        "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" "${2:-2}" > "$FIFO_DIR/canc" 2>&1 &
         PID_CANC=$!
 
-        "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" "${1:-4}" > >(sed 's/^/[RMC] /') 2>&1 &
+        "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" "${1:-4}" > "$FIFO_DIR/rmc" 2>&1 &
         PID_RMC=$!
 
         limpiado=false
@@ -104,12 +112,13 @@ case "$CAPA" in
             kill -TERM "$PID_CANC" "$PID_RMC" 2>/dev/null || true
             wait "$PID_CANC" 2>/dev/null || true
             wait "$PID_RMC" 2>/dev/null || true
-            sleep 0.5
+            wait "$PID_SED_CANC" "$PID_SED_RMC" 2>/dev/null || true
+            rm -rf "$FIFO_DIR"
             echo "[+] Capa de negocio detenida."
         }
         trap cleanup_negocio EXIT INT TERM
 
-        wait
+        wait "$PID_CANC" "$PID_RMC" || true
         ;;
 
     gt)
