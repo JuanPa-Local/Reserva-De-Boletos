@@ -29,7 +29,7 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
        +----------------------------+   +----------------------------+
        |     MÁQUINA 2: NEGOCIO     |   |     MÁQUINA 2: NEGOCIO     |
        |       Servicio RMC         |   |    Servicio Cancelación    |
-       |  - Escucha en :5556        |   |  - Escucha en :5557        |
+       |  - Escucha en :5556 (+ réplicas) |   |  - Escucha en :5557 (+ réplicas) |
        |  - Lazy Pirate a Persist.  |   |  - Notifica a PULL cliente |
        +--------------+-------------+   +-------------+--------------+
                       |                               |
@@ -76,7 +76,7 @@ sudo dnf install -y gcc-c++ zeromq-devel cppzmq-devel libpqxx-devel libpq-devel 
 
 ## 3. Configuración del Entorno (`config.env`)
 
-El archivo [config.env](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/config.env) centraliza las IPs, puertos y credenciales:
+El archivo [config.env](config.env) centraliza las IPs, puertos y credenciales:
 
 ```env
 IP_CLIENTES=10.43.99.220
@@ -163,7 +163,7 @@ g++ -std=c++17 -Wall -Wextra -O2 capa_Consumidores/cliente.cpp -o capa_Consumido
 
 ## 6. Demostración en Una Sola Máquina (`demo.sh`)
 
-El script automatizado [demo.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/demo.sh) ejecuta la suite completa de demostración en `127.0.0.1`:
+El script automatizado [demo.sh](demo.sh) ejecuta la suite completa de demostración en `127.0.0.1`:
 1. Resetea la BD con `schema_demo.sql` antes de iniciar los servicios.
 2. Inicia Persistencia, **2 réplicas de Cancelación** (puertos 5557 y 5567), RMC y GT con conexión segura sin contraseñas en CLI (`PGPASSWORD`). El GT registra ambas réplicas de Cancelación.
 3. **Paso B (concurrente)**: `cli_demo1` reserva 5 asientos de `E1` y `cli_demo2` reserva 3 asientos de `E1`, **al mismo tiempo**.
@@ -182,7 +182,7 @@ Ejecutar:
 
 ## 7. Despliegue Distribuido en 3 Máquinas (`iniciar_capa.sh`)
 
-Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/iniciar_capa.sh), el cual toma las IPs y puertos de `config.env`:
+Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa.sh](iniciar_capa.sh), el cual toma las IPs y puertos de `config.env`:
 
 ### Orden Estricto de Arranque:
 
@@ -220,7 +220,7 @@ Ejecutar los clientes de prueba:
 
 ## 8. Escenarios de Carga y Concurrencia (`lanzar_clientes.sh`)
 
-El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado.
+El script [lanzar_clientes.sh](lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado.
 
 > [!IMPORTANT]
 > **Duración y Carga de Pruebas**: Para evaluar la capacidad real del sistema distribuido y estabilizar las métricas de rendimiento (promedio, desviación estándar y TPM), las pruebas de rendimiento deben durar **entre 2 y 3 minutos** (120 s a 180 s) y emplear un **TPM alto** (por defecto 300 solicitudes/minuto por cliente). Duraciones más cortas o TPMs bajos no permiten saturar los canales de concurrencia ni observar el régimen estacionario de los servicios backend.
@@ -328,7 +328,7 @@ Cancelación[i] --PUSH--> PULL del cliente   (NOTIF|idReserva|OK|mensaje)
 |---|---|
 | Cae una réplica de RMC | El supervisor la relanza en 1 s; el GT reintenta (2 intentos de 1,2 s) con el mismo `idPeticion` hacia una réplica viva. El cliente no ve el error. |
 | Cae una réplica de Cancelación | El `PUSH` del GT la omite (`ZMQ_IMMEDIATE`) y el supervisor la relanza. |
-| Cae el GT | El supervisor de `./iniciar_capa.sh gt` lo relanza; los clientes reintentan con Lazy Pirate y las cancelaciones pendientes en Cancelación/Persistencia no se pierden. |
+| Cae el GT | El supervisor de `./iniciar_capa.sh gt` lo relanza y los clientes reintentan con Lazy Pirate. |
 | Persistencia no responde | RMC y Cancelación reintentan y devuelven `ERROR|...` al cliente (o notificación `ERROR`). |
 
 **Limitaciones asumidas**
