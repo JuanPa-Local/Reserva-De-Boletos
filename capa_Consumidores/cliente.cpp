@@ -62,6 +62,7 @@ struct Configuracion {
     bool modoAleatorio = false;
     int pctConsulta = 70;         // % CONSULTA
     int pctModificar = 0;         // % MODIFICAR opcional (por defecto 0)
+    int pctCancelar = 0;
     int duracionSegundos = 60;    // duración en segundos en modo aleatorio
     unsigned int semilla = 0;     // semilla para generador aleatorio
 };
@@ -356,7 +357,9 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
                  to_string(configuracion.solicitudesPorMinuto) + " TPM, " +
                  to_string(configuracion.pctConsulta) + "% CONSULTA / " +
                  to_string(configuracion.pctModificar) + "% MODIFICAR / " +
-                 to_string(100 - configuracion.pctConsulta - configuracion.pctModificar) + "% RESERVAR, duracion " +
+                 to_string(configuracion.pctCancelar) + "% CANCELAR / " +
+                 to_string(100 - configuracion.pctConsulta - configuracion.pctModificar - configuracion.pctCancelar) +
+                 "% RESERVAR, duracion " +
                  to_string(configuracion.duracionSegundos) + " s (" +
                  to_string(eventosDisponibles.size()) + " eventos detectados)");
 
@@ -367,18 +370,18 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
 
             Solicitud solicitud;
             const int roll = distPct(generador);
-            if (roll < configuracion.pctConsulta) {
+            const int limConsulta = configuracion.pctConsulta;
+            const int limModificar = limConsulta + configuracion.pctModificar;
+            const int limCancelar = limModificar + configuracion.pctCancelar;
+            if (roll < limConsulta) {
                 solicitud.tipo = "CONSULTA";
                 solicitud.argumentos = {"11"};
-            } else if (roll < configuracion.pctConsulta + configuracion.pctModificar) {
-                if (!ultimaReserva.empty()) {
-                    solicitud.tipo = "MODIFICAR";
-                    solicitud.argumentos = {ultimaReserva, to_string(distAsientos(generador)), "-"};
-                } else {
-                    solicitud.tipo = "RESERVAR";
-                    const pair<string, string>& ev = eventosDisponibles[distEv(generador)];
-                    solicitud.argumentos = {ev.first, ev.second, to_string(distAsientos(generador))};
-                }
+            } else if (roll < limModificar && !ultimaReserva.empty()) {
+                solicitud.tipo = "MODIFICAR";
+                solicitud.argumentos = {ultimaReserva, to_string(distAsientos(generador)), "-"};
+            } else if (roll >= limModificar && roll < limCancelar && !ultimaReserva.empty()) {
+                solicitud.tipo = "CANCELAR";
+                solicitud.argumentos = {ultimaReserva};
             } else {
                 solicitud.tipo = "RESERVAR";
                 const pair<string, string>& ev = eventosDisponibles[distEv(generador)];
@@ -394,6 +397,9 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
                 chrono::duration<double, milli>(chrono::steady_clock::now() - antes).count();
 
             estadisticas.registrar(solicitud.tipo, milisegundos);
+            if (solicitud.tipo == "CANCELAR" && respuesta.rfind("ACK|", 0) == 0) {
+                ultimaReserva.clear();
+            }
             if (solicitud.tipo == "RESERVAR" && !extraerIdReserva(respuesta).empty()) {
                 ultimaReserva = extraerIdReserva(respuesta);
             }
@@ -446,8 +452,8 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
 int main(int argc, char** argv) {
     if (argc < 6) {
         cerr << "Uso (archivo):   " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> <solicitudes.txt> [solicitudesPorMinuto=20]\n"
-             << "Uso (aleatorio): " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm>=20 <pctConsulta>=70 <duracionSeg>=60 [semilla]\n"
-             << "Flags opcionales: --archivo <f> | --aleatorio --tpm <N> --pct <P> --duracion <S> --semilla <seed>\n"
+             << "Uso (aleatorio): " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm>=20 <pctConsulta>=70 <duracionSeg>=60 [semilla] [pctModificar] [pctCancelar]\n"
+             << "Flags opcionales: --archivo <f> | --aleatorio --tpm <N> --pct <P> --pct-modificar <P> --pct-cancelar <P> --duracion <S> --semilla <seed>\n"
              << "Ej.: " << argv[0] << " cli1 tcp://10.0.0.2:5555 10.0.0.1 6001 solicitudes.txt 30\n";
         return 1;
     }
@@ -478,6 +484,9 @@ int main(int argc, char** argv) {
             if (idx < argc && argv[idx][0] != '-') {
                 configuracion.pctModificar = stoi(argv[idx++]);
             }
+            if (idx < argc && argv[idx][0] != '-') {
+                configuracion.pctCancelar = stoi(argv[idx++]);
+            }
         } else if (arg5[0] != '-') {
             configuracion.archivoSolicitudes = arg5;
             ++idx;
@@ -504,6 +513,9 @@ int main(int argc, char** argv) {
             } else if ((flag == "--pct-modificar" || flag == "--pct-mod") && idx + 1 < argc) {
                 configuracion.pctModificar = stoi(argv[++idx]);
                 ++idx;
+            } else if (flag == "--pct-cancelar" && idx + 1 < argc) {
+                configuracion.pctCancelar = stoi(argv[++idx]);
+                ++idx;
             } else if (flag == "--duracion" && idx + 1 < argc) {
                 configuracion.duracionSegundos = stoi(argv[++idx]);
                 ++idx;
@@ -525,8 +537,11 @@ int main(int argc, char** argv) {
         if (configuracion.pctModificar < 0 || configuracion.pctModificar > 100) {
             throw invalid_argument("pctModificar debe estar entre 0 y 100");
         }
-        if (configuracion.pctConsulta + configuracion.pctModificar > 100) {
-            throw invalid_argument("pctConsulta + pctModificar no debe exceder 100%");
+        if (configuracion.pctCancelar < 0 || configuracion.pctCancelar > 100) {
+            throw invalid_argument("pctCancelar debe estar entre 0 y 100");
+        }
+        if (configuracion.pctConsulta + configuracion.pctModificar + configuracion.pctCancelar > 100) {
+            throw invalid_argument("pctConsulta + pctModificar + pctCancelar no debe exceder 100%");
         }
         if (configuracion.modoAleatorio && configuracion.duracionSegundos <= 0) {
             throw invalid_argument("duracion debe ser mayor que 0");

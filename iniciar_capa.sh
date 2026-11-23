@@ -3,20 +3,22 @@
 #
 # Arquitectura:
 #   M3 (Almacenamiento) : persistencia (+ Docker PostgreSQL)
-#   M2 (Negocio)        : negocio (rmc + cancelacion en paralelo con logs visibles)
-#   M1 (Entrada/GT)     : gt (gestor de transacciones)
+#   M2 (Negocio)        : N réplicas de RMC + N réplicas de Cancelación (manifiesto en config.env)
+#   M1 (Entrada/GT)     : gt (gestor de transacciones, reiniciado automáticamente si cae)
 #   Clientes            : clientes (invoca lanzar_clientes.sh hacia M1)
+#
+# Manifiesto de réplicas (config.env):
+#   REPLICAS_RMC=3  REPLICAS_CANCELACION=2  PASO_REPLICA=10
+#   La réplica i escucha en PUERTO_BASE + i*PASO_REPLICA  (ej.: RMC 5556,5566,5576)
 #
 # Uso:
 #   ./iniciar_capa.sh <persistencia|negocio|gt|clientes> [argumentos_adicionales...]
 #
 # Ejemplos:
 #   ./iniciar_capa.sh persistencia
-#   ./iniciar_capa.sh negocio
-#   ./iniciar_capa.sh gt
+#   ./iniciar_capa.sh negocio [trabajadoresRMC=4] [trabajadoresCancelacion=2]
+#   ./iniciar_capa.sh gt [trabajadores=4]
 #   ./iniciar_capa.sh clientes --escenario 3
-#   ./iniciar_capa.sh clientes --escenario 5 30 20
-#   ./iniciar_capa.sh clientes 5 aleatorio 30 70 20
 
 set -e
 
@@ -25,6 +27,10 @@ if [ -f "$DIR/config.env" ]; then
     # shellcheck disable=SC1091
     source "$DIR/config.env"
 fi
+
+REPLICAS_RMC="${REPLICAS_RMC:-1}"
+REPLICAS_CANCELACION="${REPLICAS_CANCELACION:-1}"
+PASO_REPLICA="${PASO_REPLICA:-10}"
 
 CAPA="$1"
 shift || true
@@ -35,16 +41,9 @@ if [ -z "$CAPA" ]; then
     echo "================================================================================"
     echo "Capas disponibles:"
     echo "  persistencia : Inicia el servicio de almacenamiento (M3: $IP_PERSISTENCIA:$PUERTO_PERSISTENCIA)"
-    echo "  negocio      : Inicia RMC ($PUERTO_RMC) y Cancelacion ($PUERTO_CANCELACION) en M2 ($IP_RMC)"
+    echo "  negocio      : Inicia $REPLICAS_RMC réplica(s) de RMC (desde $PUERTO_RMC) y $REPLICAS_CANCELACION de Cancelacion (desde $PUERTO_CANCELACION) en M2 ($IP_RMC)"
     echo "  gt           : Inicia el Gestor de Transacciones en M1 ($IP_GT:$PUERTO_GT)"
     echo "  clientes     : Lanza clientes concurrentes hacia GT ($IP_GT:$PUERTO_GT)"
-    echo ""
-    echo "Ejemplos:"
-    echo "  $0 persistencia"
-    echo "  $0 negocio"
-    echo "  $0 gt"
-    echo "  $0 clientes --escenario 3"
-    echo "  $0 clientes --escenario 5 30 20"
     exit 1
 fi
 
@@ -66,6 +65,33 @@ compilar_si_necesario() {
     fi
 }
 
+# Lista de endpoints "tcp://ip:puerto,..." para N réplicas con puertos base + i*paso
+construir_endpoints() {
+    local ip="$1" base="$2" cantidad="$3" lista="" i
+    for ((i = 0; i < cantidad; i++)); do
+        lista+="${lista:+,}tcp://${ip}:$((base + i * PASO_REPLICA))"
+    done
+    echo "$lista"
+}
+
+# Supervisor: ejecuta el comando y lo vuelve a lanzar si muere solo (proceso sustituto).
+# Mantiene abierta la salida (FIFO) mientras viva, así el lector no recibe EOF entre reinicios.
+# Al recibir TERM detiene al hijo, espera a que imprima su resumen y termina.
+supervisar() {
+    local etiqueta="$1" fifo="$2"
+    shift 2
+    exec > "$fifo" 2>&1
+    local hijo=0
+    trap 'kill -TERM "$hijo" 2>/dev/null; wait "$hijo" 2>/dev/null; exit 0' TERM
+    while true; do
+        "$@" &
+        hijo=$!
+        wait "$hijo" || true
+        echo "[SUPERVISOR] $etiqueta terminó inesperadamente; reiniciando en 1 s..."
+        sleep 1
+    done
+}
+
 case "$CAPA" in
     persistencia)
         compilar_si_necesario "$BIN_PERSISTENCIA" "$DIR/capa_Servicio-Almacenamiento/persistencia.cpp" "-lzmq -lpqxx -lpq -lpthread"
@@ -83,55 +109,82 @@ case "$CAPA" in
         compilar_si_necesario "$BIN_RMC" "$DIR/capa_Servicios-Negocio/servicio_RMC/rmc.cpp" "-lzmq -lpthread"
         compilar_si_necesario "$BIN_CANCELACION" "$DIR/capa_Servicios-Negocio/servicio_Cancelacion/servicioCancelar.cpp" "-lzmq -lpthread"
         ENDPOINT_PERSISTENCIA="tcp://${IP_PERSISTENCIA:-127.0.0.1}:${PUERTO_PERSISTENCIA:-5558}"
+        TRAB_RMC="${1:-4}"
+        TRAB_CANC="${2:-2}"
         echo "================================================================================"
-        echo " INICIANDO CAPA DE NEGOCIO (RMC + Cancelacion)"
-        echo " RMC          : Escuchando en puerto $PUERTO_RMC (hacia $ENDPOINT_PERSISTENCIA)"
-        echo " Cancelacion  : Escuchando en puerto $PUERTO_CANCELACION (hacia $ENDPOINT_PERSISTENCIA)"
+        echo " INICIANDO CAPA DE NEGOCIO (réplicas según manifiesto en config.env)"
+        echo " RMC          : $REPLICAS_RMC réplica(s) -> $(construir_endpoints "${IP_RMC:-127.0.0.1}" "${PUERTO_RMC:-5556}" "$REPLICAS_RMC")"
+        echo " Cancelacion  : $REPLICAS_CANCELACION réplica(s) -> $(construir_endpoints "${IP_CANCELACION:-127.0.0.1}" "${PUERTO_CANCELACION:-5557}" "$REPLICAS_CANCELACION")"
+        echo " Persistencia : $ENDPOINT_PERSISTENCIA"
         echo "================================================================================"
 
         FIFO_DIR="$(mktemp -d)"
-        mkfifo "$FIFO_DIR/canc" "$FIFO_DIR/rmc"
+        PIDS_SED=()
+        PIDS_SUP=()
 
-        ( trap '' INT; exec sed -u 's/^/[CANCELACION] /' < "$FIFO_DIR/canc" ) &
-        PID_SED_CANC=$!
-        ( trap '' INT; exec sed -u 's/^/[RMC] /' < "$FIFO_DIR/rmc" ) &
-        PID_SED_RMC=$!
+        # lanzar_replica <etiqueta> <fifo> <comando...>
+        lanzar_replica() {
+            local etiqueta="$1" fifo="$2"
+            shift 2
+            mkfifo "$fifo"
+            # Lector con prefijo: ignora SIGINT (para no morir antes que el servicio) y termina solo en EOF
+            ( trap '' INT; exec sed -u "s/^/[$etiqueta] /" < "$fifo" ) &
+            PIDS_SED+=($!)
+            supervisar "$etiqueta" "$fifo" "$@" &
+            PIDS_SUP+=($!)
+        }
 
-        "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" "${2:-2}" > "$FIFO_DIR/canc" 2>&1 &
-        PID_CANC=$!
-
-        "$BIN_RMC" "${PUERTO_RMC:-5556}" "$ENDPOINT_PERSISTENCIA" "${1:-4}" > "$FIFO_DIR/rmc" 2>&1 &
-        PID_RMC=$!
+        for ((i = 0; i < REPLICAS_CANCELACION; i++)); do
+            lanzar_replica "CANC#$i" "$FIFO_DIR/canc$i" \
+                "$BIN_CANCELACION" "$(( ${PUERTO_CANCELACION:-5557} + i * PASO_REPLICA ))" "$ENDPOINT_PERSISTENCIA" "$TRAB_CANC"
+        done
+        for ((i = 0; i < REPLICAS_RMC; i++)); do
+            lanzar_replica "RMC#$i" "$FIFO_DIR/rmc$i" \
+                "$BIN_RMC" "$(( ${PUERTO_RMC:-5556} + i * PASO_REPLICA ))" "$ENDPOINT_PERSISTENCIA" "$TRAB_RMC"
+        done
 
         limpiado=false
         cleanup_negocio() {
             if [ "$limpiado" = true ]; then return; fi
             limpiado=true
             echo ""
-            echo "[-] Deteniendo servicios de negocio (RMC PID $PID_RMC, Cancelacion PID $PID_CANC)..."
-            kill -TERM "$PID_CANC" "$PID_RMC" 2>/dev/null || true
-            wait "$PID_CANC" 2>/dev/null || true
-            wait "$PID_RMC" 2>/dev/null || true
-            wait "$PID_SED_CANC" "$PID_SED_RMC" 2>/dev/null || true
+            echo "[-] Deteniendo capa de negocio (${#PIDS_SUP[@]} réplicas)..."
+            kill -TERM "${PIDS_SUP[@]}" 2>/dev/null || true
+            wait "${PIDS_SUP[@]}" 2>/dev/null || true   # los servicios imprimen su resumen al apagarse
+            wait "${PIDS_SED[@]}" 2>/dev/null || true   # los lectores vuelcan todo y terminan en EOF
             rm -rf "$FIFO_DIR"
             echo "[+] Capa de negocio detenida."
         }
         trap cleanup_negocio EXIT INT TERM
 
-        wait "$PID_CANC" "$PID_RMC" || true
+        wait "${PIDS_SUP[@]}" || true
         ;;
 
     gt)
         compilar_si_necesario "$BIN_GT" "$DIR/capa_Servicios-Negocio/servicio_GT/gestorTransacciones.cpp" "-lzmq -lpthread"
-        ENDPOINT_RMC="tcp://${IP_RMC:-127.0.0.1}:${PUERTO_RMC:-5556}"
-        ENDPOINT_CANCELACION="tcp://${IP_CANCELACION:-127.0.0.1}:${PUERTO_CANCELACION:-5557}"
+        ENDPOINT_RMC="$(construir_endpoints "${IP_RMC:-127.0.0.1}" "${PUERTO_RMC:-5556}" "$REPLICAS_RMC")"
+        ENDPOINT_CANCELACION="$(construir_endpoints "${IP_CANCELACION:-127.0.0.1}" "${PUERTO_CANCELACION:-5557}" "$REPLICAS_CANCELACION")"
         echo "================================================================================"
         echo " INICIANDO GESTOR DE TRANSACCIONES (GT)"
         echo " Puerto clientes   : $PUERTO_GT"
-        echo " Endpoint RMC      : $ENDPOINT_RMC"
-        echo " Endpoint Cancelar : $ENDPOINT_CANCELACION"
+        echo " Endpoints RMC     : $ENDPOINT_RMC"
+        echo " Endpoints Cancelar: $ENDPOINT_CANCELACION"
         echo "================================================================================"
-        exec "$BIN_GT" "${PUERTO_GT:-5555}" "$ENDPOINT_RMC" "$ENDPOINT_CANCELACION" "${1:-4}"
+
+        detener=0
+        PID_GT=0
+        trap 'detener=1; kill -TERM "$PID_GT" 2>/dev/null || true' INT TERM
+        while true; do
+            "$BIN_GT" "${PUERTO_GT:-5555}" "$ENDPOINT_RMC" "$ENDPOINT_CANCELACION" "${1:-4}" &
+            PID_GT=$!
+            wait "$PID_GT" || true
+            if [ "$detener" -eq 1 ]; then
+                wait "$PID_GT" 2>/dev/null || true   # deja que el GT imprima su resumen
+                break
+            fi
+            echo "[SUPERVISOR] El GT terminó inesperadamente; reiniciando en 1 s..."
+            sleep 1
+        done
         ;;
 
     clientes)
