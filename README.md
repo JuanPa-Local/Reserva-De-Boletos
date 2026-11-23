@@ -276,3 +276,20 @@ Para generar el archivo ZIP limpio para entrega (sin binarios, objetos `.o`, log
 ./empaquetar.sh
 ```
 El archivo comprimido `Reserva-De-Boletos.zip` se generará en el directorio superior.
+
+---
+
+### 11. Réplicas y manifiesto
+Las réplicas de la capa de negocio se declaran en `config.env`
+(`REPLICAS_RMC`, `REPLICAS_CANCELACION`, `PASO_REPLICA`). `./iniciar_capa.sh negocio`
+lanza cada réplica bajo un supervisor que la reinicia si cae, y `./iniciar_capa.sh gt`
+construye las listas de endpoints con el mismo manifiesto.
+
+---
+
+### 12. Cancelación asíncrona
+Cliente --REQ--> GT --ACK inmediato--> Cliente
+GT --PUSH (round-robin)--> Cancelación[i] (PULL) --REQ--> Persistencia
+Cancelación[i] --PUSH--> PULL del cliente (NOTIF|idReserva|OK|mensaje)
+Las réplicas se registran en el GT pasando todos sus endpoints; una réplica caída se
+omite (`ZMQ_IMMEDIATE`). Persistencia es idempotente por `idPeticion`.
