@@ -44,6 +44,7 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
                       |  - Hilos libpqxx directos   |
                       |  - Contenedor PostgreSQL    |
                       |    (Puerto :5434 -> :5432)  |
+                      |  - Réplica PostgreSQL de lectura (:5435) |
                       +-----------------------------+
 ```
 
@@ -53,7 +54,7 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
 |---|---|---|---|---|
 | **M1** | Gestor de Transacciones (GT) | `5555` | TCP | Entrada de clientes a GT |
 | **M2** | Capa de Negocio | `5556-5599` | TCP | Réplicas según manifiesto (`PASO_REPLICA=10`): RMC en `5556`, `5566`, `5576` (síncrono); Cancelación en `5557`, `5567` (asíncrono) |
-| **M3** | Capa de Almacenamiento | `5558`, `5434` | TCP | `5558`: Persistencia ZeroMQ<br>`5434`: PostgreSQL Docker (mapeado) |
+| **M3** | Capa de Almacenamiento | `5558`, `5434`, `5435` | TCP | `5558`: Persistencia ZeroMQ<br>`5434`: PostgreSQL primaria<br>`5435`: réplica de lectura |
 | **Clientes** | Clientes consumidores | `6001` en adelante | TCP | PULL para recibir notificaciones asíncronas de cancelación |
 
 ---
@@ -101,6 +102,12 @@ CONTAINER_POSTGRES=srb_postgres
 REPLICAS_RMC=3              # RMC en 5556, 5566, 5576
 REPLICAS_CANCELACION=2      # Cancelación en 5557, 5567
 PASO_REPLICA=10             # la réplica i escucha en PUERTO_BASE + i*PASO_REPLICA
+
+# --- Réplica de lectura de PostgreSQL (M3) ---
+PUERTO_POSTGRES_REPLICA=5435        # comenta esta línea para trabajar sin réplica
+IP_POSTGRES_REPLICA=10.43.99.215    # M3, o la máquina donde pongas la réplica
+REPL_PASSWORD=replica
+CONTAINER_POSTGRES_REPLICA=srb_postgres_replica
 ```
 
 > [!NOTE]
@@ -122,6 +129,21 @@ docker compose --env-file config.env up -d
 ### Esquemas disponibles
 1. **`schema_demo.sql`**: Contiene 2 eventos de prueba (`E1` y `E2`) con 100 asientos cada uno. Utilizado para la demostración oficial.
 2. **`schema.sql`**: Contiene 50 eventos con diferentes capacidades y fechas. Utilizado para pruebas de rendimiento y carga masiva.
+
+### Replicación
+
+El comando habitual levanta la base primaria y la réplica de lectura:
+```bash
+docker compose --env-file config.env up -d
+```
+En el primer arranque, la réplica se clona automáticamente desde la primaria con `pg_basebackup`; no se le carga ningún esquema. Para reiniciar ambas bases desde cero:
+```bash
+docker compose --env-file config.env down -v
+```
+Para consultar el estado y comparar los totales de la primaria y la réplica:
+```bash
+./estado_replica.sh
+```
 
 ### Reset de la Base de Datos
 Para reiniciar la base de datos al estado inicial de demostración:
@@ -171,7 +193,8 @@ El script automatizado [demo.sh](demo.sh) ejecuta la suite completa de demostrac
 5. **Paso D**: 6 clientes concurrentes intentan reservar 20 asientos cada uno en `E2` (capacidad 100). Verifica que 5 son aceptados (`OK|`) y 1 es rechazado (`RECHAZADO`).
 6. **Paso E**: Consulta `E2`, valida en BD que queda en `0/100` y verifica consistencia global (`total_ocupados == sum(asientos)`).
 7. **Paso F (cancelación asíncrona concurrente)**: 4 clientes cancelan al mismo tiempo sus reservas de 20 asientos de `E2`. Verifica que cada uno recibe su notificación `NOTIF|...|OK|`, muestra cuántas cancelaciones atendió cada réplica y comprueba en BD que `E2` queda en `80/20` y consistente.
-8. Muestra logs en vivo de cada servicio tras cada paso.
+8. **Paso G**: Compara primaria y réplica (si el contenedor de la réplica existe).
+9. Muestra logs en vivo de cada servicio tras cada paso.
 
 Ejecutar:
 ```bash
@@ -255,7 +278,7 @@ El script [lanzar_clientes.sh](lanzar_clientes.sh) implementa los roles y escena
 
 - **Persistencia**:
   ```bash
-  ./capa_Servicio-Almacenamiento/persistencia <puertoEscucha> "<cadenaConexionPostgres>" [trabajadores=4]
+  ./capa_Servicio-Almacenamiento/persistencia <puertoEscucha> "<cadenaPrimaria>" [trabajadores=4] ["<cadenaReplica1>;<cadenaReplica2>;..."]
   ```
 - **RMC**:
   ```bash
@@ -329,10 +352,12 @@ Cancelación[i] --PUSH--> PULL del cliente   (NOTIF|idReserva|OK|mensaje)
 | Cae una réplica de RMC | El supervisor la relanza en 1 s; el GT reintenta (2 intentos de 1,2 s) con el mismo `idPeticion` hacia una réplica viva. El cliente no ve el error. |
 | Cae una réplica de Cancelación | El `PUSH` del GT la omite (`ZMQ_IMMEDIATE`) y el supervisor la relanza. |
 | Cae el GT | El supervisor de `./iniciar_capa.sh gt` lo relanza y los clientes reintentan con Lazy Pirate. |
+| Cae la réplica de lectura | Las `CONSULTA` pasan a la primaria y la réplica se reintenta cada 5 s; las escrituras no se afectan. |
+| Cae la primaria | Las escrituras devuelven `ERROR`. Recuperación manual: `docker exec srb_postgres_replica psql -U postgres -c "SELECT pg_promote();"`, luego poner en `config.env` el host y puerto de la réplica como primaria y reiniciar Persistencia. |
 | Persistencia no responde | RMC y Cancelación reintentan y devuelven `ERROR|...` al cliente (o notificación `ERROR`). |
 
 **Limitaciones asumidas**
 - Los mensajes que estaban en la cola de una réplica de Cancelación en el instante en que muere se pierden: el cliente recibió el `ACK` pero no la notificación.
 - La sustitución es local a cada máquina (reinicio de procesos); no hay conmutación entre máquinas si cae un nodo completo.
-- Persistencia y PostgreSQL no están replicados (único punto de falla de datos).
+- La réplica de PostgreSQL es solo de lectura; si cae la primaria, la promoción y el cambio de configuración requieren intervención manual.
 - Los mensajes ZeroMQ viajan sin cifrar y `idCliente` no se autentica.

@@ -1,19 +1,20 @@
-# docker-compose.yml - Contenedor PostgreSQL para el SRB
+# docker-compose.yml - PostgreSQL del SRB: primaria (escrituras) + una réplica de lectura (streaming replication)
 #
 # IMPORTANTE:
 # Ejecutar siempre con:
 #   docker compose --env-file config.env up -d
 #
-# Explicacion:
-# Las variables ${DB_USER}, ${DB_PASSWORD}, ${DB_NAME} y ${PUERTO_POSTGRES} se interpolan
-# por docker compose a nivel de definicion del servicio (ports, environment). Si no se usa
-# --env-file config.env, docker compose no las resuelve desde env_file y recurre a valores
-# por defecto o vacios.
+# Las variables ${DB_USER}, ${DB_PASSWORD}, ${DB_NAME}, ${PUERTO_POSTGRES} y ${PUERTO_POSTGRES_REPLICA}
+# se interpolan con --env-file config.env.
 #
-# Carga automatica del esquema:
-# El volumen monta schema_demo.sql en /docker-entrypoint-initdb.d/01-schema_demo.sql,
-# lo que permite la inicializacion automatica de las tablas y eventos de prueba (E1 y E2)
-# cuando se crea el volumen de la base de datos por primera vez.
+# Carga automática del esquema (solo la primaria, al crear el volumen por primera vez):
+# schema_demo.sql en /docker-entrypoint-initdb.d/01-schema_demo.sql (E1 y E2).
+# La réplica NO carga nada: se clona de la primaria con pg_basebackup al arrancar por primera vez.
+#
+# Para reiniciar todo desde cero (primaria + réplica):  docker compose --env-file config.env down -v
+#
+# Réplica en otra máquina: en esa máquina, con PRIMARY_HOST=<ip de la primaria> y PRIMARY_PORT=5434:
+#   docker compose --env-file config.env up -d postgres_replica
 
 services:
   postgres:
@@ -26,7 +27,28 @@ services:
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: ${DB_NAME:-srb}
+      REPL_PASSWORD: ${REPL_PASSWORD:-replica}
     ports:
       - "${PUERTO_POSTGRES:-5434}:5432"
     volumes:
+      - ./replicacion/00-replicacion.sh:/docker-entrypoint-initdb.d/00-replicacion.sh:ro,z
       - ./schema_demo.sql:/docker-entrypoint-initdb.d/01-schema_demo.sql:ro,z
+
+  postgres_replica:
+    image: postgres:16
+    container_name: srb_postgres_replica
+    restart: unless-stopped
+    env_file:
+      - config.env
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-srb}
+      REPL_PASSWORD: ${REPL_PASSWORD:-replica}
+      PRIMARY_HOST: ${PRIMARY_HOST:-postgres}
+      PRIMARY_PORT: ${PRIMARY_PORT:-5432}
+    ports:
+      - "${PUERTO_POSTGRES_REPLICA:-5435}:5432"
+    volumes:
+      - ./replicacion/replica-entrypoint.sh:/replica-entrypoint.sh:ro,z
+    entrypoint: ["bash", "/replica-entrypoint.sh"]

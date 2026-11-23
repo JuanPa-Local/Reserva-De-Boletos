@@ -95,14 +95,24 @@ supervisar() {
 case "$CAPA" in
     persistencia)
         compilar_si_necesario "$BIN_PERSISTENCIA" "$DIR/capa_Servicio-Almacenamiento/persistencia.cpp" "-lzmq -lpqxx -lpq -lpthread"
+        # Réplica de lectura de PostgreSQL (opcional): se usa si PUERTO_POSTGRES_REPLICA está definido en config.env
+        CADENA_REPLICA=""
+        if [ -n "${PUERTO_POSTGRES_REPLICA:-}" ]; then
+            CADENA_REPLICA="host=${IP_POSTGRES_REPLICA:-127.0.0.1} port=${PUERTO_POSTGRES_REPLICA} dbname=${DB_NAME:-srb} user=${DB_USER:-postgres}"
+        fi
         echo "================================================================================"
         echo " INICIANDO CAPA DE ALMACENAMIENTO (Persistencia)"
-        echo " Puerto escucha: $PUERTO_PERSISTENCIA"
-        echo " Base de datos : 127.0.0.1:$PUERTO_POSTGRES ($DB_NAME)"
+        echo " Puerto escucha : $PUERTO_PERSISTENCIA"
+        echo " BD primaria    : 127.0.0.1:$PUERTO_POSTGRES ($DB_NAME)  [escrituras]"
+        if [ -n "$CADENA_REPLICA" ]; then
+            echo " BD réplica     : ${IP_POSTGRES_REPLICA:-127.0.0.1}:${PUERTO_POSTGRES_REPLICA}  [consultas]"
+        else
+            echo " BD réplica     : (sin réplica)"
+        fi
         echo "================================================================================"
         export PGPASSWORD="${DB_PASSWORD:-postgres}"
         CADENA_PG="host=127.0.0.1 port=${PUERTO_POSTGRES:-5434} dbname=${DB_NAME:-srb} user=${DB_USER:-postgres}"
-        exec "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "${1:-4}"
+        exec "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "${1:-4}" "$CADENA_REPLICA"
         ;;
 
     negocio)

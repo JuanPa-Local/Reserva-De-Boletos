@@ -142,7 +142,13 @@ echo "[-] Iniciando servicios de backend..."
 # Cadena de conexion sin password en linea de comandos (libpq usa PGPASSWORD)
 CADENA_PG="host=127.0.0.1 port=$PUERTO_PG dbname=$DB user=$DB_USER"
 
-"$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" 4 > /tmp/srb_persistencia.log 2>&1 &
+CADENA_REPLICA=""
+if docker ps --format '{{.Names}}' | grep -q '^srb_postgres_replica$'; then
+    CADENA_REPLICA="host=127.0.0.1 port=${PUERTO_POSTGRES_REPLICA:-5435} dbname=$DB user=$DB_USER"
+    echo "[+] Réplica de lectura detectada: las CONSULTA se servirán desde ella."
+fi
+
+"$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" 4 "$CADENA_REPLICA" > /tmp/srb_persistencia.log 2>&1 &
 PID_PERSISTENCIA=$!
 
 "$BIN_CANCELACION" "${PUERTO_CANCELACION:-5557}" "$ENDPOINT_PERSISTENCIA" 2 > /tmp/srb_cancelacion.log 2>&1 &
@@ -327,6 +333,22 @@ if [ "$NOTIFS" -ne 4 ] || [ "$RES_F" != "80/20" ]; then
 fi
 echo -e "[\033[1;32mOK\033[0m] Cancelaciones asíncronas verificadas (80/20)."
 "$DIR/estado.sh"
+
+if docker ps --format '{{.Names}}' | grep -q '^srb_postgres_replica$'; then
+    echo "================================================================================"
+    echo " PASO G: Replicación - la réplica debe coincidir con la primaria"
+    echo "================================================================================"
+    sleep 1
+    CONSULTA_TOTAL="SELECT sum(libres) || '/' || sum(ocupados) FROM evento;"
+    TOTAL_PRIM=$(docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB" -Atc "$CONSULTA_TOTAL")
+    TOTAL_REPL=$(docker exec -i srb_postgres_replica psql -U "$DB_USER" -d "$DB" -Atc "$CONSULTA_TOTAL")
+    echo ">> Primaria: $TOTAL_PRIM | Réplica: $TOTAL_REPL"
+    if [ "$TOTAL_PRIM" != "$TOTAL_REPL" ]; then
+        echo -e "[\033[1;31mFALLO\033[0m] La réplica no coincide con la primaria."
+        exit 1
+    fi
+    echo -e "[\033[1;32mOK\033[0m] Réplica consistente con la primaria ($TOTAL_REPL)."
+fi
 
 echo ""
 echo "================================================================================"
