@@ -27,6 +27,31 @@ fi
 [ -n "$ENV_PUERTO_GT" ] && PUERTO_GT="$ENV_PUERTO_GT"
 [ -n "$ENV_PUERTO_NOTIF_BASE" ] && PUERTO_NOTIF_BASE="$ENV_PUERTO_NOTIF_BASE"
 
+MES="${MES:-11}"
+# Extraer flag opcional --mes si se especifica
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mes=*)
+            MES="${1#--mes=}"
+            shift
+            ;;
+        --mes)
+            MES="$2"
+            shift 2
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ ${#ARGS[@]} -gt 0 ]; then
+    set -- "${ARGS[@]}"
+else
+    set --
+fi
+
 ESCENARIO=""
 if [ "$1" = "--escenario" ]; then
     ESCENARIO="$2"
@@ -83,7 +108,7 @@ if [ -n "$ESCENARIO" ]; then
 else
     echo " Lanzando $N clientes concurrentes hacia GT ($ENDPOINT_GT)"
 fi
-echo " Modo: $MODO | TPM: $TPM | Duracion: ${DURACION}s"
+echo " Modo: $MODO | TPM: $TPM | Duracion: ${DURACION}s | Mes: $MES"
 echo "================================================================================"
 
 PIDS=()
@@ -119,10 +144,10 @@ for ((i=1; i<=N; i++)); do
                 ROL="Reserva y Modificación (50%/50%)"
             fi
         fi
-        "$CLIENTE_BIN" "$CLI_ID" "$ENDPOINT_GT" "$IP_CLI" "$PUERTO_NOTIF" aleatorio "$TPM" "$PCT_CONS" "$DURACION" "$SEMILLA" "$PCT_MOD" > "$LOG_FILE" 2>&1 &
+        "$CLIENTE_BIN" "$CLI_ID" "$ENDPOINT_GT" "$IP_CLI" "$PUERTO_NOTIF" aleatorio "$TPM" "$PCT_CONS" "$DURACION" "$SEMILLA" "$PCT_MOD" --mes "$MES" > "$LOG_FILE" 2>&1 &
         echo "[-] Cliente $CLI_ID [$ROL] iniciado (PID: $!, puerto notif: $PUERTO_NOTIF, log: $LOG_FILE)"
     elif [ "$MODO" = "aleatorio" ]; then
-        "$CLIENTE_BIN" "$CLI_ID" "$ENDPOINT_GT" "$IP_CLI" "$PUERTO_NOTIF" aleatorio "$TPM" "$PCT" "$DURACION" "$SEMILLA" > "$LOG_FILE" 2>&1 &
+        "$CLIENTE_BIN" "$CLI_ID" "$ENDPOINT_GT" "$IP_CLI" "$PUERTO_NOTIF" aleatorio "$TPM" "$PCT" "$DURACION" "$SEMILLA" --mes "$MES" > "$LOG_FILE" 2>&1 &
         echo "[-] Cliente $CLI_ID iniciado (PID: $!, puerto notif: $PUERTO_NOTIF, log: $LOG_FILE)"
     else
         "$CLIENTE_BIN" "$CLI_ID" "$ENDPOINT_GT" "$IP_CLI" "$PUERTO_NOTIF" "$MODO" "$TPM" > "$LOG_FILE" 2>&1 &
