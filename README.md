@@ -315,7 +315,8 @@ Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa
 #### Paso 2: En Máquina 2 (M2 - Negocio: 10.43.100.38)
 Arranca las réplicas de RMC y Cancelación declaradas en el manifiesto (`config.env`), cada una bajo un supervisor que la reinicia si cae, con logs prefijados por réplica (`[RMC#0]`, `[CANC#1]`, ...):
 ```bash
-./iniciar_capa.sh negocio [trabajadoresRMC=4] [trabajadoresCancelacion=2]
+./iniciar_capa.sh negocio 4 2
+# (o simplemente ./iniciar_capa.sh negocio para usar los valores por defecto 4 y 2)
 ```
 Al terminar con `Ctrl+C`, cada réplica imprime su resumen de métricas antes de cerrarse.
 
