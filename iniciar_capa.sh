@@ -112,7 +112,20 @@ case "$CAPA" in
         echo "================================================================================"
         export PGPASSWORD="${DB_PASSWORD:-postgres}"
         CADENA_PG="host=127.0.0.1 port=${PUERTO_POSTGRES:-5434} dbname=${DB_NAME:-srb} user=${DB_USER:-postgres}"
-        exec "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "${1:-4}" "$CADENA_REPLICA"
+        detener=0
+        PID_PERS=0
+        trap 'detener=1; kill -TERM "$PID_PERS" 2>/dev/null || true' INT TERM
+        while true; do
+            "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "${1:-4}" "$CADENA_REPLICA" &
+            PID_PERS=$!
+            wait "$PID_PERS" || true
+            if [ "$detener" -eq 1 ]; then
+                wait "$PID_PERS" 2>/dev/null || true
+                break
+            fi
+            echo "[SUPERVISOR] Persistencia terminó inesperadamente; reiniciando en 1 s..."
+            sleep 1
+        done
         ;;
 
     negocio)

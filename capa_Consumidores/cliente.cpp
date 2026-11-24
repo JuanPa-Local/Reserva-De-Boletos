@@ -65,6 +65,7 @@ struct Configuracion {
     int pctCancelar = 0;
     int duracionSegundos = 60;    // duración en segundos en modo aleatorio
     unsigned int semilla = 0;     // semilla para generador aleatorio
+    string mes = "11";            // mes a consultar en modo aleatorio (1-12)
 };
 
 struct Solicitud {
@@ -328,10 +329,10 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
     int contador = 0;
 
     if (configuracion.modoAleatorio) {
-        // Descubrir eventos existentes en la BD mediante una consulta del mes 11
+        // Descubrir eventos existentes en la BD mediante una consulta del mes configurado
         vector<pair<string, string>> eventosDisponibles;
         const string peticionInit = configuracion.idCliente + "-" + idCorrida + "-init";
-        const string msgInit = construirMensaje("CONSULTA", peticionInit, configuracion, {"11"});
+        const string msgInit = construirMensaje("CONSULTA", peticionInit, configuracion, {configuracion.mes});
         const string respInit = gestor.enviar(msgInit);
         if (respInit.rfind("OK|", 0) == 0) {
             const string datos = respInit.substr(3);
@@ -344,8 +345,11 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
             }
         }
         if (eventosDisponibles.empty()) {
-            eventosDisponibles.push_back({"E1", "2026-11-01"});
-            eventosDisponibles.push_back({"E2", "2026-11-01"});
+            int mesNum = 11;
+            try { mesNum = stoi(configuracion.mes); } catch (...) { mesNum = 11; }
+            const string mesPad = (mesNum < 10 ? "0" + to_string(mesNum) : to_string(mesNum));
+            eventosDisponibles.push_back({"E1", "2026-" + mesPad + "-01"});
+            eventosDisponibles.push_back({"E2", "2026-" + mesPad + "-01"});
         }
 
         mt19937 generador(configuracion.semilla != 0 ? configuracion.semilla : static_cast<unsigned int>(nanosAhora()));
@@ -359,7 +363,7 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
                  to_string(configuracion.pctModificar) + "% MODIFICAR / " +
                  to_string(configuracion.pctCancelar) + "% CANCELAR / " +
                  to_string(100 - configuracion.pctConsulta - configuracion.pctModificar - configuracion.pctCancelar) +
-                 "% RESERVAR, duracion " +
+                 "% RESERVAR, mes " + configuracion.mes + ", duracion " +
                  to_string(configuracion.duracionSegundos) + " s (" +
                  to_string(eventosDisponibles.size()) + " eventos detectados)");
 
@@ -375,7 +379,7 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
             const int limCancelar = limModificar + configuracion.pctCancelar;
             if (roll < limConsulta) {
                 solicitud.tipo = "CONSULTA";
-                solicitud.argumentos = {"11"};
+                solicitud.argumentos = {configuracion.mes};
             } else if (roll < limModificar && !ultimaReserva.empty()) {
                 solicitud.tipo = "MODIFICAR";
                 solicitud.argumentos = {ultimaReserva, to_string(distAsientos(generador)), "-"};
@@ -452,8 +456,8 @@ void ejecutarSolicitudes(const Configuracion& configuracion) {
 int main(int argc, char** argv) {
     if (argc < 6) {
         cerr << "Uso (archivo):   " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> <solicitudes.txt> [solicitudesPorMinuto=20]\n"
-             << "Uso (aleatorio): " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm>=20 <pctConsulta>=70 <duracionSeg>=60 [semilla] [pctModificar] [pctCancelar]\n"
-             << "Flags opcionales: --archivo <f> | --aleatorio --tpm <N> --pct <P> --pct-modificar <P> --pct-cancelar <P> --duracion <S> --semilla <seed>\n"
+             << "Uso (aleatorio): " << argv[0] << " <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm>=20 <pctConsulta>=70 <duracionSeg>=60 [semilla] [pctModificar] [pctCancelar] [--mes <MM>]\n"
+             << "Flags opcionales: --archivo <f> | --aleatorio --tpm <N> --pct <P> --pct-modificar <P> --pct-cancelar <P> --duracion <S> --semilla <seed> --mes <MM>\n"
              << "Ej.: " << argv[0] << " cli1 tcp://10.0.0.2:5555 10.0.0.1 6001 solicitudes.txt 30\n";
         return 1;
     }
@@ -522,9 +526,25 @@ int main(int argc, char** argv) {
             } else if (flag == "--semilla" && idx + 1 < argc) {
                 configuracion.semilla = static_cast<unsigned int>(stoul(argv[++idx]));
                 ++idx;
+            } else if (flag == "--mes" && idx + 1 < argc) {
+                configuracion.mes = argv[++idx];
+                ++idx;
+            } else if (flag.rfind("--mes=", 0) == 0) {
+                configuracion.mes = flag.substr(6);
+                ++idx;
             } else {
                 ++idx;
             }
+        }
+
+        int mesInt = 0;
+        try {
+            mesInt = stoi(configuracion.mes);
+        } catch (...) {
+            throw invalid_argument("mes debe ser un numero entre 1 y 12 (actual: " + configuracion.mes + ")");
+        }
+        if (mesInt < 1 || mesInt > 12) {
+            throw invalid_argument("mes debe estar entre 1 y 12 (actual: " + configuracion.mes + ")");
         }
 
         if (configuracion.solicitudesPorMinuto < 20) {
