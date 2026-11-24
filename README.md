@@ -29,7 +29,7 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
        +----------------------------+   +----------------------------+
        |     MÁQUINA 2: NEGOCIO     |   |     MÁQUINA 2: NEGOCIO     |
        |       Servicio RMC         |   |    Servicio Cancelación    |
-       |  - Escucha en :5556        |   |  - Escucha en :5557        |
+       |  - Escucha en :5556 (+ réplicas) |   |  - Escucha en :5557 (+ réplicas) |
        |  - Lazy Pirate a Persist.  |   |  - Notifica a PULL cliente |
        +--------------+-------------+   +-------------+--------------+
                       |                               |
@@ -44,6 +44,7 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
                       |  - Hilos libpqxx directos   |
                       |  - Contenedor PostgreSQL    |
                       |    (Puerto :5434 -> :5432)  |
+                      |  - Réplica PostgreSQL de lectura (:5435) |
                       +-----------------------------+
 ```
 
@@ -52,8 +53,8 @@ El sistema desacopla sus responsabilidades en 4 capas distribuidas en 3 máquina
 | Máquina | Rol | Puertos a abrir | Protocolo | Descripción |
 |---|---|---|---|---|
 | **M1** | Gestor de Transacciones (GT) | `5555` | TCP | Entrada de clientes a GT |
-| **M2** | Capa de Negocio | `5556`, `5557` | TCP | `5556`: RMC (síncrono)<br>`5557`: Cancelación (asíncrono) |
-| **M3** | Capa de Almacenamiento | `5558`, `5434` | TCP | `5558`: Persistencia ZeroMQ<br>`5434`: PostgreSQL Docker (mapeado) |
+| **M2** | Capa de Negocio | `5556-5599` | TCP | Réplicas según manifiesto (`PASO_REPLICA=10`): RMC en `5556`, `5566`, `5576` (síncrono); Cancelación en `5557`, `5567` (asíncrono) |
+| **M3** | Capa de Almacenamiento | `5558`, `5434`, `5435` | TCP | `5558`: Persistencia ZeroMQ<br>`5434`: PostgreSQL primaria<br>`5435`: réplica de lectura |
 | **Clientes** | Clientes consumidores | `6001` en adelante | TCP | PULL para recibir notificaciones asíncronas de cancelación |
 
 ---
@@ -76,7 +77,7 @@ sudo dnf install -y gcc-c++ zeromq-devel cppzmq-devel libpqxx-devel libpq-devel 
 
 ## 3. Configuración del Entorno (`config.env`)
 
-El archivo [config.env](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/config.env) centraliza las IPs, puertos y credenciales:
+El archivo [config.env](config.env) centraliza las IPs, puertos y credenciales:
 
 ```env
 IP_CLIENTES=10.43.99.220
@@ -96,7 +97,23 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 DB_NAME=srb
 CONTAINER_POSTGRES=srb_postgres
+
+# --- Manifiesto de réplicas (M2) ---
+REPLICAS_RMC=3              # RMC en 5556, 5566, 5576
+REPLICAS_CANCELACION=2      # Cancelación en 5557, 5567
+PASO_REPLICA=10             # la réplica i escucha en PUERTO_BASE + i*PASO_REPLICA
+
+# --- Réplica de lectura de PostgreSQL (M3) ---
+PUERTO_POSTGRES_REPLICA=5435        # comenta esta línea para trabajar sin réplica
+IP_POSTGRES_REPLICA=10.43.99.215    # M3, o la máquina donde pongas la réplica
+REPL_PASSWORD=replica
+CONTAINER_POSTGRES_REPLICA=srb_postgres_replica
 ```
+
+> [!NOTE]
+> El manifiesto es declarativo: para escalar basta con cambiar `REPLICAS_RMC` o
+> `REPLICAS_CANCELACION` y reiniciar `./iniciar_capa.sh negocio` (M2) y `./iniciar_capa.sh gt` (M1).
+> Ambas máquinas deben tener el mismo `config.env`.
 
 ---
 
@@ -112,6 +129,21 @@ docker compose --env-file config.env up -d
 ### Esquemas disponibles
 1. **`schema_demo.sql`**: Contiene 2 eventos de prueba (`E1` y `E2`) con 100 asientos cada uno. Utilizado para la demostración oficial.
 2. **`schema.sql`**: Contiene 50 eventos con diferentes capacidades y fechas. Utilizado para pruebas de rendimiento y carga masiva.
+
+### Replicación
+
+El comando habitual levanta la base primaria y la réplica de lectura:
+```bash
+docker compose --env-file config.env up -d
+```
+En el primer arranque, la réplica se clona automáticamente desde la primaria con `pg_basebackup`; no se le carga ningún esquema. Para reiniciar ambas bases desde cero:
+```bash
+docker compose --env-file config.env down -v
+```
+Para consultar el estado y comparar los totales de la primaria y la réplica:
+```bash
+./estado_replica.sh
+```
 
 ### Reset de la Base de Datos
 Para reiniciar la base de datos al estado inicial de demostración:
@@ -153,14 +185,16 @@ g++ -std=c++17 -Wall -Wextra -O2 capa_Consumidores/cliente.cpp -o capa_Consumido
 
 ## 6. Demostración en Una Sola Máquina (`demo.sh`)
 
-El script automatizado [demo.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/demo.sh) ejecuta la suite completa de demostración en `127.0.0.1`:
+El script automatizado [demo.sh](demo.sh) ejecuta la suite completa de demostración en `127.0.0.1`:
 1. Resetea la BD con `schema_demo.sql` antes de iniciar los servicios.
-2. Inicia Persistencia, Cancelación, RMC y GT con conexión segura sin contraseñas en CLI (`PGPASSWORD`).
-3. **Paso B**: `cli_demo1` reserva 5 asientos de `E1`; `cli_demo2` reserva 3 asientos de `E1`.
+2. Inicia Persistencia, **2 réplicas de Cancelación** (puertos 5557 y 5567), RMC y GT con conexión segura sin contraseñas en CLI (`PGPASSWORD`). El GT registra ambas réplicas de Cancelación.
+3. **Paso B (concurrente)**: `cli_demo1` reserva 5 asientos de `E1` y `cli_demo2` reserva 3 asientos de `E1`, **al mismo tiempo**.
 4. **Paso C**: Consulta `E1` y verifica mediante aserción en BD (`psql -Atc`) que queda en `92/8`.
 5. **Paso D**: 6 clientes concurrentes intentan reservar 20 asientos cada uno en `E2` (capacidad 100). Verifica que 5 son aceptados (`OK|`) y 1 es rechazado (`RECHAZADO`).
 6. **Paso E**: Consulta `E2`, valida en BD que queda en `0/100` y verifica consistencia global (`total_ocupados == sum(asientos)`).
-7. Muestra logs en vivo de cada servicio tras cada paso.
+7. **Paso F (cancelación asíncrona concurrente)**: 4 clientes cancelan al mismo tiempo sus reservas de 20 asientos de `E2`. Verifica que cada uno recibe su notificación `NOTIF|...|OK|`, muestra cuántas cancelaciones atendió cada réplica y comprueba en BD que `E2` queda en `80/20` y consistente.
+8. **Paso G**: Compara primaria y réplica (si el contenedor de la réplica existe).
+9. Muestra logs en vivo de cada servicio tras cada paso.
 
 Ejecutar:
 ```bash
@@ -171,7 +205,7 @@ Ejecutar:
 
 ## 7. Despliegue Distribuido en 3 Máquinas (`iniciar_capa.sh`)
 
-Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/iniciar_capa.sh), el cual toma las IPs y puertos de `config.env`:
+Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa.sh](iniciar_capa.sh), el cual toma las IPs y puertos de `config.env`:
 
 ### Orden Estricto de Arranque:
 
@@ -187,13 +221,14 @@ Para la sustentación en 3 máquinas físicas o virtuales, utilice [iniciar_capa
    ```
 
 #### Paso 2: En Máquina 2 (M2 - Negocio: 10.43.100.38)
-Arrancar los servicios RMC y Cancelación en simultáneo con logs prefijados en consola:
+Arranca las réplicas de RMC y Cancelación declaradas en el manifiesto (`config.env`), cada una bajo un supervisor que la reinicia si cae, con logs prefijados por réplica (`[RMC#0]`, `[CANC#1]`, ...):
 ```bash
-./iniciar_capa.sh negocio
+./iniciar_capa.sh negocio [trabajadoresRMC=4] [trabajadoresCancelacion=2]
 ```
+Al terminar con `Ctrl+C`, cada réplica imprime su resumen de métricas antes de cerrarse.
 
 #### Paso 3: En Máquina 1 (M1 - Entrada: 10.43.100.37)
-Arrancar el Gestor de Transacciones (GT):
+El GT construye la lista de réplicas desde el mismo manifiesto, las registra al arrancar (`[GT] Réplica de Cancelación registrada: ...`) y se reinicia automáticamente si el proceso cae:
 ```bash
 ./iniciar_capa.sh gt
 ```
@@ -208,7 +243,7 @@ Ejecutar los clientes de prueba:
 
 ## 8. Escenarios de Carga y Concurrencia (`lanzar_clientes.sh`)
 
-El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/proyecto/Reserva-De-Boletos/lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado.
+El script [lanzar_clientes.sh](lanzar_clientes.sh) implementa los roles y escenarios de prueba de rendimiento definidos en la Tabla 1 del enunciado.
 
 > [!IMPORTANT]
 > **Duración y Carga de Pruebas**: Para evaluar la capacidad real del sistema distribuido y estabilizar las métricas de rendimiento (promedio, desviación estándar y TPM), las pruebas de rendimiento deben durar **entre 2 y 3 minutos** (120 s a 180 s) y emplear un **TPM alto** (por defecto 300 solicitudes/minuto por cliente). Duraciones más cortas o TPMs bajos no permiten saturar los canales de concurrencia ni observar el régimen estacionario de los servicios backend.
@@ -243,7 +278,7 @@ El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/pro
 
 - **Persistencia**:
   ```bash
-  ./capa_Servicio-Almacenamiento/persistencia <puertoEscucha> "<cadenaConexionPostgres>" [trabajadores=4]
+  ./capa_Servicio-Almacenamiento/persistencia <puertoEscucha> "<cadenaPrimaria>" [trabajadores=4] ["<cadenaReplica1>;<cadenaReplica2>;..."]
   ```
 - **RMC**:
   ```bash
@@ -255,17 +290,15 @@ El script [lanzar_clientes.sh](file:///home/silvaaa/Documents/uni/5to/distri/pro
   ```
 - **Gestor de Transacciones**:
   ```bash
-  ./capa_Servicios-Negocio/servicio_GT/gestor <puertoClientes> <endpointRmc[,endpointRmc2,...]> <endpointCancelacion> [trabajadores=4]
+  ./capa_Servicios-Negocio/servicio_GT/gestor <puertoClientes> <endpointRmc[,endpointRmc2,...]> <endpointCancelacion[,endpointCancelacion2,...]> [trabajadores=4]
   ```
-- **Cliente**:
-  - Modo Archivo:
-    ```bash
-    ./capa_Consumidores/cliente <idCliente> <endpointGT> <ipCliente> <puertoNotif> <solicitudes.txt> [solicitudesPorMinuto=20]
-    ```
-  - Modo Aleatorio:
-    ```bash
-    ./capa_Consumidores/cliente <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm> <pctConsulta> <duracionSeg> <semilla> [pctModificar=0]
-    ```
+- **Cliente, modo aleatorio**:
+  ```bash
+  ./capa_Consumidores/cliente <idCliente> <endpointGT> <ipCliente> <puertoNotif> aleatorio <tpm> <pctConsulta> <duracionSeg> <semilla> [pctModificar=0] [pctCancelar=0]
+  # o con flags: --pct-modificar <P> --pct-cancelar <P>
+  ```
+  `pctConsulta + pctModificar + pctCancelar` no puede superar 100; el resto son `RESERVAR`.
+  `MODIFICAR` y `CANCELAR` actúan sobre la última reserva exitosa del cliente.
 
 ---
 
@@ -276,3 +309,55 @@ Para generar el archivo ZIP limpio para entrega (sin binarios, objetos `.o`, log
 ./empaquetar.sh
 ```
 El archivo comprimido `Reserva-De-Boletos.zip` se generará en el directorio superior.
+
+---
+
+### 11. Réplicas y manifiesto
+
+La escalabilidad de la capa de negocio se declara en `config.env` (`REPLICAS_RMC`, `REPLICAS_CANCELACION`, `PASO_REPLICA`). La réplica `i` escucha en `PUERTO_BASE + i*PASO_REPLICA`.
+
+| Servicio | Réplicas (por defecto) | Puertos | Balanceo |
+|---|---|---|---|
+| RMC | 3 | 5556, 5566, 5576 | cada trabajador del GT usa un `REQ` conectado a todas las réplicas (round-robin) |
+| Cancelación | 2 | 5557, 5567 | el `PUSH` del GT reparte round-robin entre los `PULL` de las réplicas |
+
+- `./iniciar_capa.sh negocio` lanza cada réplica bajo un **supervisor** que la reinicia en 1 s si el proceso muere.
+- `./iniciar_capa.sh gt` construye las listas de endpoints con el mismo manifiesto y supervisa al GT.
+- Los sockets usan `ZMQ_IMMEDIATE`: solo se envía a réplicas con conexión establecida, así una réplica caída se omite sola.
+
+---
+
+### 12. Cancelación asíncrona
+
+```
+Cliente --REQ--> GT --ACK inmediato--> Cliente
+GT --PUSH (round-robin)--> Cancelación[i] (PULL)
+Cancelación[i] --REQ--> Persistencia --OK/RECHAZADO/ERROR--> Cancelación[i]
+Cancelación[i] --PUSH--> PULL del cliente   (NOTIF|idReserva|OK|mensaje)
+```
+
+1. El cliente envía `CANCELAR|idPeticion|idCliente|idReserva|endpointCliente`; el GT responde `ACK` de inmediato (no bloquea) y reenvía por `PUSH` no bloqueante.
+2. Una réplica de Cancelación toma el mensaje, ordena la liberación de asientos a Persistencia (`REQ/REP` con timeout y reintentos, patrón Lazy Pirate) y espera su respuesta.
+3. Con ese resultado notifica **directamente** al cliente mediante un `PUSH` hacia el `PULL` que el cliente abrió (su endpoint viaja en el mensaje). Si Persistencia falla o rechaza, el cliente recibe `NOTIF|...|ERROR|motivo`.
+4. Los reintentos reenvían el mismo `idPeticion`; Persistencia es **idempotente** (`reserva.req_cancelacion`), por lo que ninguna reserva se libera dos veces aunque la procese otra réplica.
+
+**Registro de réplicas:** el GT conecta su `PUSH` a todos los endpoints del manifiesto y lo confirma en su log al arrancar (`[GT] Réplica de Cancelación registrada: tcp://...`).
+
+---
+
+### 13. Tolerancia a fallos y limitaciones
+
+| Falla | Comportamiento |
+|---|---|
+| Cae una réplica de RMC | El supervisor la relanza en 1 s; el GT reintenta (2 intentos de 1,2 s) con el mismo `idPeticion` hacia una réplica viva. El cliente no ve el error. |
+| Cae una réplica de Cancelación | El `PUSH` del GT la omite (`ZMQ_IMMEDIATE`) y el supervisor la relanza. |
+| Cae el GT | El supervisor de `./iniciar_capa.sh gt` lo relanza y los clientes reintentan con Lazy Pirate. |
+| Cae la réplica de lectura | Las `CONSULTA` pasan a la primaria y la réplica se reintenta cada 5 s; las escrituras no se afectan. |
+| Cae la primaria | Las escrituras devuelven `ERROR`. Recuperación manual: `docker exec srb_postgres_replica psql -U postgres -c "SELECT pg_promote();"`, luego poner en `config.env` el host y puerto de la réplica como primaria y reiniciar Persistencia. |
+| Persistencia no responde | RMC y Cancelación reintentan y devuelven `ERROR|...` al cliente (o notificación `ERROR`). |
+
+**Limitaciones asumidas**
+- Los mensajes que estaban en la cola de una réplica de Cancelación en el instante en que muere se pierden: el cliente recibió el `ACK` pero no la notificación.
+- La sustitución es local a cada máquina (reinicio de procesos); no hay conmutación entre máquinas si cae un nodo completo.
+- La réplica de PostgreSQL es solo de lectura; si cae la primaria, la promoción y el cambio de configuración requieren intervención manual.
+- Los mensajes ZeroMQ viajan sin cifrar y `idCliente` no se autentica.

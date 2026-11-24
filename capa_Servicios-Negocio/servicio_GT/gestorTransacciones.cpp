@@ -50,8 +50,8 @@
 
 using namespace std;
 
-constexpr int timeoutRmcMs = 2000;           // menor que el timeout del cliente (3000 ms)
-constexpr int reintentosRmc = 1;
+constexpr int timeoutRmcMs = 1200;           // 2 intentos x 1.2 s < timeout del cliente (3 s)
+constexpr int reintentosRmc = 2;
 constexpr int intervaloPollMs = 100;
 constexpr int timeoutLecturaTrabajadorMs = 200;
 const string endpointTrabajos = "inproc://trabajos";
@@ -302,7 +302,10 @@ public:
 
         cancelacion_.set(zmq::sockopt::linger, 0);
         cancelacion_.set(zmq::sockopt::immediate, 1);  // si Cancelación no está conectada, se informa al cliente
-        cancelacion_.connect(configuracion.endpointCancelacion);
+        for (const string& endpoint : dividir(configuracion.endpointCancelacion, ',')) {
+            cancelacion_.connect(endpoint);
+            imprimir("[GT] Réplica de Cancelación registrada: " + endpoint);
+        }
 
         for (int i = 0; i < configuracion.numeroTrabajadores; ++i) {
             trabajadores_.push_back(make_unique<TrabajadorRmc>(contexto, configuracion.endpointsRmc, activo_));

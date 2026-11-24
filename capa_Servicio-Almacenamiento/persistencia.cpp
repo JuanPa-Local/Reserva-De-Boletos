@@ -15,6 +15,13 @@
  *   (RESERVAR usa reserva.req_id UNIQUE; LIBERAR usa reserva.req_cancelacion; MODIFICAR es idempotente por sí misma).
  * - Al iniciar y al terminar se imprime un resumen del estado de la BD y una verificación de consistencia
  *   (asientos ocupados == suma de asientos de reservas activas), útil para la sustentación.
+ * - Replicación (líder único): TODA escritura (RESERVAR, MODIFICAR, LIBERAR) va a la base PRIMARIA con
+ *   SELECT ... FOR UPDATE; así el invariante libres >= 0 nunca depende de una copia. PostgreSQL replica la
+ *   primaria hacia réplicas de solo lectura (streaming replication) y las CONSULTAS se sirven desde ellas
+ *   (cada trabajador usa una réplica distinta). Si una réplica cae o no responde, la consulta cae a la
+ *   primaria y la réplica se reintenta pasados unos segundos. Las lecturas pueden ir unos ms atrasadas.
+ * - Este servicio es sin estado: se pueden lanzar varias instancias (puertos distintos) contra la misma
+ *   primaria; RMC y Cancelación reparten entre ellas y la idempotencia por idPeticion evita duplicados.
  * - RAII: sockets, hilos y conexiones se liberan en los destructores; sin new/delete (unique_ptr).
  *
  * Contrato (mensajes de texto separados por '|'; los solicitantes usan REQ y este servicio hace bind):
@@ -26,8 +33,9 @@
  *   (en MODIFICAR, la fecha '-' significa "misma fecha, solo cambia el número de asientos")
  *
  * Compilar: g++ -std=c++17 -Wall -Wextra -O2 persistencia.cpp -o persistencia -lzmq -lpqxx -lpq -lpthread
- * Ejecutar: ./persistencia <puertoEscucha> "<cadenaConexionPostgres>" [trabajadores=4]
- *   Ej.:    ./persistencia 5558 "host=127.0.0.1 port=5434 dbname=srb user=postgres password=postgres" 4
+ * Ejecutar: ./persistencia <puertoEscucha> "<cadenaPrimaria>" [trabajadores=4] ["<replica1>;<replica2>;..."]
+ *   Ej.:    ./persistencia 5558 "host=127.0.0.1 port=5434 dbname=srb user=postgres password=postgres" 4 \
+ *             "host=127.0.0.1 port=5435 dbname=srb user=postgres password=postgres"
  */
 
 #include <zmq.hpp>
@@ -64,6 +72,10 @@ constexpr int timeoutLecturaTrabajadorMs = 200;
 constexpr size_t maximoCaracteresRespuestaEnLog = 70;
 const string endpointTrabajos = "inproc://trabajos-bd";
 const string endpointResultados = "inproc://resultados-bd";
+constexpr int esperaReintentoReplicaSegundos = 5;  // tras un fallo, las CONSULTAS usan la primaria durante este tiempo
+
+atomic<long long> lecturasEnReplica{0};
+atomic<long long> lecturasEnPrimaria{0};
 
 atomic<bool> senalRecibida{false};
 
@@ -74,6 +86,7 @@ void manejarSenal(int /*senal*/) {
 struct Configuracion {
     int puertoEscucha = 5558;
     string cadenaConexion;
+    vector<string> cadenasReplicas;  // réplicas de solo lectura (opcional)
     int numeroTrabajadores = 4;
 };
 
@@ -212,8 +225,14 @@ string textoAsientos(const int cantidad) {
 // Una instancia por hilo trabajador: guarda su propia conexión y ejecuta una transacción por operación.
 class RepositorioReservas {
 public:
-    explicit RepositorioReservas(const string& cadenaConexion)
-        : cadenaConexion_(cadenaConexion + " connect_timeout=2") {}
+    RepositorioReservas(const string& cadenaConexion, const vector<string>& cadenasReplicas,
+                        const size_t indiceTrabajador)
+        : cadenaConexion_(cadenaConexion + " connect_timeout=2"),
+          indiceReplica_(cadenasReplicas.empty() ? 0 : indiceTrabajador % cadenasReplicas.size()) {
+        for (const string& cadena : cadenasReplicas) {
+            cadenasReplicas_.push_back(cadena + " connect_timeout=2");
+        }
+    }
 
     string procesar(const Solicitud& solicitud) {
         for (int intento = 1; intento <= intentosTransaccion; ++intento) {
@@ -256,13 +275,30 @@ private:
         return liberar(solicitud);
     }
 
-    // ---- CONSULTA: eventos de un mes con sus asientos libres y ocupados
+    // ---- CONSULTA: eventos de un mes con sus asientos libres y ocupados (desde réplica, con respaldo en la primaria)
     string consultar(const Solicitud& solicitud) {
         long long mes = 0;
         if (!aEntero(solicitud.argumentos[0], mes) || mes < 1 || mes > 12) {
             return "RECHAZADO|Mes invalido (use 1-12)";
         }
-        pqxx::read_transaction tx(conexion());
+        if (pqxx::connection* lectura = conexionLectura()) {
+            try {
+                const string respuesta = consultarEn(*lectura, mes);
+                ++lecturasEnReplica;
+                return respuesta;
+            } catch (const pqxx::broken_connection& error) {
+                descartarReplica(error.what());
+            } catch (const pqxx::sql_error& error) {
+                descartarReplica(error.what());  // p. ej. conflicto de recuperación en la réplica
+            }
+        }
+        const string respuesta = consultarEn(conexion(), mes);
+        ++lecturasEnPrimaria;
+        return respuesta;
+    }
+
+    static string consultarEn(pqxx::connection& conexion, const long long mes) {
+        pqxx::read_transaction tx(conexion);
         const pqxx::result resultado = tx.exec_params(
             "SELECT id_evento, to_char(fecha, 'YYYY-MM-DD'), libres, ocupados FROM evento "
             "WHERE EXTRACT(MONTH FROM fecha) = $1::int ORDER BY length(id_evento), id_evento, fecha",
@@ -440,8 +476,38 @@ private:
         return true;
     }
 
+    // Réplica de lectura asignada a este trabajador; nullptr si no hay réplicas o está en espera tras un fallo.
+    pqxx::connection* conexionLectura() {
+        if (cadenasReplicas_.empty() || chrono::steady_clock::now() < proximoIntentoReplica_) {
+            return nullptr;
+        }
+        if (!conexionLectura_) {
+            try {
+                conexionLectura_ = make_unique<pqxx::connection>(cadenasReplicas_[indiceReplica_]);
+            } catch (const exception& error) {
+                descartarReplica(error.what());
+                return nullptr;
+            }
+        }
+        return conexionLectura_.get();
+    }
+
+    // Marca la réplica como caída: pasa a la siguiente y deja que la primaria atienda las CONSULTAS un rato.
+    void descartarReplica(const string& motivo) {
+        conexionLectura_.reset();
+        imprimir("[PERSISTENCIA] Réplica de lectura " + to_string(indiceReplica_) + " no disponible (" +
+                 recortar(primeraLinea(motivo), 60) + "): CONSULTA usa la primaria " +
+                 to_string(esperaReintentoReplicaSegundos) + " s");
+        indiceReplica_ = (indiceReplica_ + 1) % cadenasReplicas_.size();
+        proximoIntentoReplica_ = chrono::steady_clock::now() + chrono::seconds(esperaReintentoReplicaSegundos);
+    }
+
     const string cadenaConexion_;
+    vector<string> cadenasReplicas_;
+    size_t indiceReplica_;
     unique_ptr<pqxx::connection> conexion_;
+    unique_ptr<pqxx::connection> conexionLectura_;
+    chrono::steady_clock::time_point proximoIntentoReplica_;
 };
 
 // ---------------------------------------------------------------- resumen del estado de la BD
@@ -468,14 +534,31 @@ void imprimirEstadoBaseDatos(const string& titulo, const string& cadenaConexion)
     imprimir("[PERSISTENCIA] " + titulo + ": " + ResumenBaseDatos::describir(conexion));
 }
 
+// Igual que la anterior, pero una réplica caída no debe impedir que el servicio arranque o termine.
+void imprimirEstadoReplicas(const string& titulo, const vector<string>& cadenasReplicas) {
+    for (size_t i = 0; i < cadenasReplicas.size(); ++i) {
+        try {
+            imprimirEstadoBaseDatos(titulo + " (réplica " + to_string(i) + ")", cadenasReplicas[i]);
+        } catch (const exception& error) {
+            imprimir("[PERSISTENCIA] " + titulo + " (réplica " + to_string(i) + "): no disponible (" +
+                     recortar(primeraLinea(error.what()), 60) + ")");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- hilo trabajador
 
 // Toma trabajos [identidad, solicitud, tRecepcion], ejecuta la transacción y devuelve
 // [identidad, respuesta, solicitud, tRecepcion] al hilo principal.
 class TrabajadorPersistencia {
 public:
-    TrabajadorPersistencia(zmq::context_t& contexto, const string& cadenaConexion, const atomic<bool>& activo)
-        : contexto_(contexto), cadenaConexion_(cadenaConexion), activo_(activo) {
+    TrabajadorPersistencia(zmq::context_t& contexto, const string& cadenaConexion,
+                           const vector<string>& cadenasReplicas, const size_t indice, const atomic<bool>& activo)
+        : contexto_(contexto),
+          cadenaConexion_(cadenaConexion),
+          cadenasReplicas_(cadenasReplicas),
+          indice_(indice),
+          activo_(activo) {
         hilo_ = thread(&TrabajadorPersistencia::ejecutar, this);
     }
 
@@ -500,7 +583,7 @@ private:
             resultados.set(zmq::sockopt::linger, 0);
             resultados.connect(endpointResultados);
 
-            RepositorioReservas repositorio(cadenaConexion_);
+            RepositorioReservas repositorio(cadenaConexion_, cadenasReplicas_, indice_);
             while (activo_) {
                 const vector<string> trabajo = recibirMultiparte(trabajos);
                 if (trabajo.size() < 3) {
@@ -527,6 +610,8 @@ private:
 
     zmq::context_t& contexto_;
     const string cadenaConexion_;
+    const vector<string> cadenasReplicas_;
+    const size_t indice_;
     const atomic<bool>& activo_;
     thread hilo_;
 };
@@ -596,11 +681,12 @@ public:
         resultados_.bind(endpointResultados);
 
         for (int i = 0; i < configuracion.numeroTrabajadores; ++i) {
-            trabajadores_.push_back(
-                make_unique<TrabajadorPersistencia>(contexto, configuracion.cadenaConexion, activo_));
+            trabajadores_.push_back(make_unique<TrabajadorPersistencia>(
+                contexto, configuracion.cadenaConexion, configuracion.cadenasReplicas, static_cast<size_t>(i), activo_));
         }
         imprimir("[PERSISTENCIA] Escuchando en el puerto " + to_string(configuracion.puertoEscucha) + " con " +
-                 to_string(configuracion.numeroTrabajadores) + " trabajador(es). Ctrl+C para terminar.");
+                 to_string(configuracion.numeroTrabajadores) + " trabajador(es) y " +
+                 to_string(configuracion.cadenasReplicas.size()) + " réplica(s) de lectura. Ctrl+C para terminar.");
     }
 
     ~ServicioPersistencia() {
@@ -634,6 +720,8 @@ public:
 
     void imprimirResumen() const {
         estadisticas_.imprimirResumen();
+        imprimir("[PERSISTENCIA] CONSULTA servidas por réplicas=" + to_string(lecturasEnReplica.load()) +
+                 "  por la primaria=" + to_string(lecturasEnPrimaria.load()));
     }
 
 private:
@@ -681,9 +769,10 @@ private:
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        cerr << "Uso: " << argv[0] << " <puertoEscucha> \"<cadenaConexionPostgres>\" [trabajadores=4]\n"
+        cerr << "Uso: " << argv[0] << " <puertoEscucha> \"<cadenaPrimaria>\" [trabajadores=4] [\"<replica1>;<replica2>;...\"]\n"
              << "Ej.: " << argv[0]
-             << " 5558 \"host=127.0.0.1 port=5434 dbname=srb user=postgres password=postgres\" 4\n";
+             << " 5558 \"host=127.0.0.1 port=5434 dbname=srb user=postgres password=postgres\" 4"
+             << " \"host=127.0.0.1 port=5435 dbname=srb user=postgres password=postgres\"\n";
         return 1;
     }
     try {
@@ -693,6 +782,13 @@ int main(int argc, char** argv) {
         if (argc >= 4) {
             configuracion.numeroTrabajadores = stoi(argv[3]);
         }
+        if (argc >= 5) {
+            for (const string& cadena : dividir(argv[4], ';')) {
+                if (!cadena.empty()) {
+                    configuracion.cadenasReplicas.push_back(cadena);
+                }
+            }
+        }
         if (configuracion.numeroTrabajadores <= 0) {
             throw invalid_argument("El numero de trabajadores debe ser mayor que 0");
         }
@@ -700,14 +796,16 @@ int main(int argc, char** argv) {
         signal(SIGINT, manejarSenal);
         signal(SIGTERM, manejarSenal);
 
-        imprimirEstadoBaseDatos("Estado inicial de la BD", configuracion.cadenaConexion);
+        imprimirEstadoBaseDatos("Estado inicial de la BD (primaria)", configuracion.cadenaConexion);
+        imprimirEstadoReplicas("Estado inicial de la BD", configuracion.cadenasReplicas);
 
         zmq::context_t contexto(1);
         ServicioPersistencia servicio(contexto, configuracion);
         servicio.ejecutar();
         servicio.imprimirResumen();
 
-        imprimirEstadoBaseDatos("Estado final de la BD", configuracion.cadenaConexion);
+        imprimirEstadoBaseDatos("Estado final de la BD (primaria)", configuracion.cadenaConexion);
+        imprimirEstadoReplicas("Estado final de la BD", configuracion.cadenasReplicas);
     } catch (const exception& error) {
         cerr << "Error: " << error.what() << endl;
         return 1;
