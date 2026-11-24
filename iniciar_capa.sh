@@ -15,9 +15,9 @@
 #   ./iniciar_capa.sh <persistencia|negocio|gt|clientes> [argumentos_adicionales...]
 #
 # Ejemplos:
-#   ./iniciar_capa.sh persistencia
-#   ./iniciar_capa.sh negocio [trabajadoresRMC=4] [trabajadoresCancelacion=2]
-#   ./iniciar_capa.sh gt [trabajadores=4]
+#   ./iniciar_capa.sh persistencia [trabajadores=4]
+#   ./iniciar_capa.sh negocio [trabajadoresRMC=4] [trabajadoresCancelacion=2]  (ej: ./iniciar_capa.sh negocio 4 2)
+#   ./iniciar_capa.sh gt [trabajadores=4]                                      (ej: ./iniciar_capa.sh gt 4)
 #   ./iniciar_capa.sh clientes --escenario 3
 
 set -e
@@ -74,6 +74,18 @@ construir_endpoints() {
     echo "$lista"
 }
 
+# Extrae solo los dígitos numéricos de un argumento (soporta "4", "[trabajadoresRMC=4]", "trabajadores=4")
+sanitizar_entero() {
+    local val="$1" defecto="$2"
+    local limpio
+    limpio=$(echo "$val" | tr -cd '0-9')
+    if [ -n "$limpio" ] && [ "$limpio" -gt 0 ] 2>/dev/null; then
+        echo "$limpio"
+    else
+        echo "$defecto"
+    fi
+}
+
 # Supervisor: ejecuta el comando y lo vuelve a lanzar si muere solo (proceso sustituto).
 # Mantiene abierta la salida (FIFO) mientras viva, así el lector no recibe EOF entre reinicios.
 # Al recibir TERM detiene al hijo, espera a que imprima su resumen y termina.
@@ -112,11 +124,12 @@ case "$CAPA" in
         echo "================================================================================"
         export PGPASSWORD="${DB_PASSWORD:-postgres}"
         CADENA_PG="host=127.0.0.1 port=${PUERTO_POSTGRES:-5434} dbname=${DB_NAME:-srb} user=${DB_USER:-postgres}"
+        TRAB_PERS="$(sanitizar_entero "${1:-4}" 4)"
         detener=0
         PID_PERS=0
         trap 'detener=1; kill -TERM "$PID_PERS" 2>/dev/null || true' INT TERM
         while true; do
-            "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "${1:-4}" "$CADENA_REPLICA" &
+            "$BIN_PERSISTENCIA" "${PUERTO_PERSISTENCIA:-5558}" "$CADENA_PG" "$TRAB_PERS" "$CADENA_REPLICA" &
             PID_PERS=$!
             wait "$PID_PERS" || true
             if [ "$detener" -eq 1 ]; then
@@ -132,13 +145,14 @@ case "$CAPA" in
         compilar_si_necesario "$BIN_RMC" "$DIR/capa_Servicios-Negocio/servicio_RMC/rmc.cpp" "-lzmq -lpthread"
         compilar_si_necesario "$BIN_CANCELACION" "$DIR/capa_Servicios-Negocio/servicio_Cancelacion/servicioCancelar.cpp" "-lzmq -lpthread"
         ENDPOINT_PERSISTENCIA="tcp://${IP_PERSISTENCIA:-127.0.0.1}:${PUERTO_PERSISTENCIA:-5558}"
-        TRAB_RMC="${1:-4}"
-        TRAB_CANC="${2:-2}"
+        TRAB_RMC="$(sanitizar_entero "${1:-4}" 4)"
+        TRAB_CANC="$(sanitizar_entero "${2:-2}" 2)"
         echo "================================================================================"
         echo " INICIANDO CAPA DE NEGOCIO (réplicas según manifiesto en config.env)"
         echo " RMC          : $REPLICAS_RMC réplica(s) -> $(construir_endpoints "${IP_RMC:-127.0.0.1}" "${PUERTO_RMC:-5556}" "$REPLICAS_RMC")"
         echo " Cancelacion  : $REPLICAS_CANCELACION réplica(s) -> $(construir_endpoints "${IP_CANCELACION:-127.0.0.1}" "${PUERTO_CANCELACION:-5557}" "$REPLICAS_CANCELACION")"
         echo " Persistencia : $ENDPOINT_PERSISTENCIA"
+        echo " Trabajadores : RMC=$TRAB_RMC por réplica | Cancelacion=$TRAB_CANC por réplica"
         echo "================================================================================"
 
         FIFO_DIR="$(mktemp -d)"
@@ -187,18 +201,20 @@ case "$CAPA" in
         compilar_si_necesario "$BIN_GT" "$DIR/capa_Servicios-Negocio/servicio_GT/gestorTransacciones.cpp" "-lzmq -lpthread"
         ENDPOINT_RMC="$(construir_endpoints "${IP_RMC:-127.0.0.1}" "${PUERTO_RMC:-5556}" "$REPLICAS_RMC")"
         ENDPOINT_CANCELACION="$(construir_endpoints "${IP_CANCELACION:-127.0.0.1}" "${PUERTO_CANCELACION:-5557}" "$REPLICAS_CANCELACION")"
+        TRAB_GT="$(sanitizar_entero "${1:-4}" 4)"
         echo "================================================================================"
         echo " INICIANDO GESTOR DE TRANSACCIONES (GT)"
         echo " Puerto clientes   : $PUERTO_GT"
         echo " Endpoints RMC     : $ENDPOINT_RMC"
         echo " Endpoints Cancelar: $ENDPOINT_CANCELACION"
+        echo " Trabajadores      : $TRAB_GT"
         echo "================================================================================"
 
         detener=0
         PID_GT=0
         trap 'detener=1; kill -TERM "$PID_GT" 2>/dev/null || true' INT TERM
         while true; do
-            "$BIN_GT" "${PUERTO_GT:-5555}" "$ENDPOINT_RMC" "$ENDPOINT_CANCELACION" "${1:-4}" &
+            "$BIN_GT" "${PUERTO_GT:-5555}" "$ENDPOINT_RMC" "$ENDPOINT_CANCELACION" "$TRAB_GT" &
             PID_GT=$!
             wait "$PID_GT" || true
             if [ "$detener" -eq 1 ]; then

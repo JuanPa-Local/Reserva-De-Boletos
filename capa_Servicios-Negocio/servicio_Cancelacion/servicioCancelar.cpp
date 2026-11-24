@@ -442,6 +442,25 @@ private:
 
 // ---------------------------------------------------------------- main
 
+// Extrae un entero positivo aunque venga formateado como [trabajadores=2], trabajadores=2 o 2
+static int extraerEnteroPositivo(const string& str, const int valorPorDefecto) {
+    string digitos;
+    for (const char c : str) {
+        if (isdigit(static_cast<unsigned char>(c))) {
+            digitos += c;
+        }
+    }
+    if (digitos.empty()) {
+        return valorPorDefecto;
+    }
+    try {
+        const int val = stoi(digitos);
+        return val > 0 ? val : valorPorDefecto;
+    } catch (...) {
+        return valorPorDefecto;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         cerr << "Uso: " << argv[0] << " <puertoEscucha> <endpointPersistencia[,endpointPersistencia2,...]> "
@@ -451,10 +470,10 @@ int main(int argc, char** argv) {
     }
     try {
         Configuracion configuracion;
-        configuracion.puertoEscucha = stoi(argv[1]);
+        configuracion.puertoEscucha = extraerEnteroPositivo(argv[1], 5557);
         configuracion.endpointsPersistencia = dividir(argv[2], ',');
         if (argc >= 4) {
-            configuracion.numeroTrabajadores = stoi(argv[3]);
+            configuracion.numeroTrabajadores = extraerEnteroPositivo(argv[3], 2);
         }
         if (configuracion.endpointsPersistencia.empty() || configuracion.numeroTrabajadores <= 0) {
             throw invalid_argument("Debe indicar al menos un endpoint de Persistencia y 1 o más trabajadores");

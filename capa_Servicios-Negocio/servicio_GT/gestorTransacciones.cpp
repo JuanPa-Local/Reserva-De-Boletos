@@ -413,6 +413,25 @@ private:
 
 // ---------------------------------------------------------------- main
 
+// Extrae un entero positivo aunque venga formateado como [trabajadores=4], trabajadores=4 o 4
+static int extraerEnteroPositivo(const string& str, const int valorPorDefecto) {
+    string digitos;
+    for (const char c : str) {
+        if (isdigit(static_cast<unsigned char>(c))) {
+            digitos += c;
+        }
+    }
+    if (digitos.empty()) {
+        return valorPorDefecto;
+    }
+    try {
+        const int val = stoi(digitos);
+        return val > 0 ? val : valorPorDefecto;
+    } catch (...) {
+        return valorPorDefecto;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) {
         cerr << "Uso: " << argv[0] << " <puertoClientes> <endpointRmc[,endpointRmc2,...]> <endpointCancelacion> "
@@ -422,11 +441,11 @@ int main(int argc, char** argv) {
     }
     try {
         Configuracion configuracion;
-        configuracion.puertoClientes = stoi(argv[1]);
+        configuracion.puertoClientes = extraerEnteroPositivo(argv[1], 5555);
         configuracion.endpointsRmc = dividir(argv[2], ',');
         configuracion.endpointCancelacion = argv[3];
         if (argc >= 5) {
-            configuracion.numeroTrabajadores = stoi(argv[4]);
+            configuracion.numeroTrabajadores = extraerEnteroPositivo(argv[4], 4);
         }
         if (configuracion.endpointsRmc.empty() || configuracion.numeroTrabajadores <= 0) {
             throw invalid_argument("Debe indicar al menos un endpoint de RMC y 1 o más trabajadores");
